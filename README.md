@@ -73,15 +73,9 @@ Supported exchanges
 
 :white_check_mark: Bitfinex
 
-:white_check_mark: Bitflyer
-
 :white_check_mark: BitMEX
 
-:white_check_mark: Bybit
-
 :white_check_mark: Coinbase Pro
-
-:white_check_mark: Upbit
 
 Contributing
 ------------
