@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "asyncio-quant-tick"
-version = "0.1.8"
-description = "Asyncio Quant Tick aggregate candlesticks from high frequency tick data from WebSockets"
+version = "0.1.7"
+description = "Asyncio Quant Tick aggregates candlesticks from high frequency tick data from WebSockets"
 authors = ["Alex <globophobe@gmail.com>"]
 readme = "README.md"
 license = "MIT"
@@ -12,26 +12,16 @@ classifiers = ["Development Status :: 4 - Beta", "Operating System :: OS Indepen
 packages = [{ include = "quant_tick" }]
 
 [tool.poetry.dependencies]
-python = ">=3.8,<4.0"
-cryptofeed = "*"
-google-cloud-bigquery = { version = "*", optional = true }
-google-cloud-bigquery-storage = { version = "*", optional = true }
-google-cloud-pubsub = { version = "*", optional = true }
-httpx = { version = "*", optional = true }
+python = ">=3.10,<4"
+cryptofeed = { git = "https://github.com/bmoscon/cryptofeed.git", branch = "master" }
 pandas = "*"
+orjson = "*"
 
 [tool.poetry.dev-dependencies]
-black = "*"
 invoke = "*"
 python-decouple = "*"
 ruff = "*"
 sentry-sdk = "*"
-
-[tool.poetry.extras]
-all = ["google-cloud-bigquery", "google-cloud-bigquery-storage", "google-cloud-pubsub", "httpx"]
-bigquery = ["google-cloud-bigquery", "google-cloud-bigquery-storage"]
-httpx = ["httpx"]
-pubsub = ["google-cloud-pubsub"]
 
 [tool.ruff]
 ignore = [
