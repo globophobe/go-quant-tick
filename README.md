@@ -69,6 +69,8 @@ For settings, see the [examples](https://github.com/globophobe/asyncio-quant-tic
 Supported exchanges
 -------------------
 
+:white_check_mark: Hyperliquid
+
 :white_check_mark: Binance
 
 :white_check_mark: Bitfinex

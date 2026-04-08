@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "asyncio-quant-tick"
 version = "0.1.7"
-description = "Asyncio Quant Tick aggregates candlesticks from high frequency tick data from WebSockets"
+description = "Asyncio Quant Tick aggregates high frequency trade data from exchange WebSockets"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Alex", email = "globophobe@gmail.com" }]
-keywords = ["quant", "trading", "trading-strategies", "coinbase", "bitfinex", "bitmex", "bybit"]
+keywords = ["quant", "trading", "trading-strategies", "hyperliquid", "binance", "coinbase", "bitfinex", "bitmex"]
 classifiers = ["Development Status :: 4 - Beta", "Operating System :: OS Independent"]
 dependencies = [
     "python-dotenv>=1.1.1",
