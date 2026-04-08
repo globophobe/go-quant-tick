@@ -1,89 +1,108 @@
 #!/usr/bin/env python3
-from typing import Callable
+import asyncio
+import os
+from collections.abc import Awaitable, Callable, Iterable
 
-import sentry_sdk
-from cryptofeed import FeedHandler
-from cryptofeed.defines import TRADES
-from decouple import config
+from dotenv import load_dotenv
 
-from quant_tick.exchanges import (
-    Binance,
-    Bitfinex,
-    Bitflyer,
-    Bitmex,
-    # Bybit,
-    Coinbase,
-    Upbit,
-)
+from quant_tick.events import TradeEvent
+from quant_tick.exchanges import Binance, Bitfinex, Bitmex, Coinbase
+from quant_tick.pipeline import run_clients
+from quant_tick.pubsub import PubSubPublisher
 from quant_tick.trades import (
-    CandleCallback,
-    NonSequentialIntegerTradeCallback,
-    SequentialIntegerTradeCallback,
     SignificantTradeCallback,
     TradeCallback,
 )
 
-sequential_integer_exchanges = {Binance: ["BTCUSDT"], Coinbase: ["BTC-USD"]}
-
-non_sequential_integer_exchanges = {Bitfinex: ["BTCUSD"]}
-
-other_exchanges = {
-    Bitmex: ["XBTUSD"],
-    # Bybit: ["BTCUSD"],
-    Bitflyer: ["BTC/JPY"],
-    Upbit: ["BTC-KRW"],
-}
+RAW_TRADES = "raw-trades"
+AGGREGATED_TRADES = "aggregated-trades"
+SIGNIFICANT_TRADES = "significant-trades"
+TRADE_STREAMS = {RAW_TRADES, AGGREGATED_TRADES, SIGNIFICANT_TRADES}
 
 
-async def candles(candle: dict, timestamp: float) -> None:
-    """Candles."""
-    print(candle)
+def get_csv_env(name: str, default: Iterable[str]) -> list[str]:
+    """Return comma-separated env config."""
+    value = os.environ.get(name)
+    if not value:
+        return list(default)
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def get_callback(exchange: any, significant_trade_filter: int = 1_000) -> Callable:
-    """Get callback."""
-    if exchange == Bitflyer:
-        significant_trade_filter *= 100
-    elif exchange == Upbit:
-        significant_trade_filter *= 1000
-    return SignificantTradeCallback(
-        CandleCallback(candles, window_seconds=60),
-        window_seconds=60,
-        significant_trade_filter=significant_trade_filter,
+def get_publish_streams() -> set[str]:
+    """Return enabled Pub/Sub streams."""
+    streams = set(get_csv_env("PUBLISH_STREAMS", [SIGNIFICANT_TRADES]))
+    unknown = streams - TRADE_STREAMS
+    if unknown:
+        raise ValueError(f"unknown publish streams: {', '.join(sorted(unknown))}")
+    return streams
+
+
+def get_publishers(project_id: str) -> dict[str, PubSubPublisher]:
+    """Return configured Pub/Sub publishers."""
+    topics = {
+        RAW_TRADES: os.environ.get("RAW_TRADES_TOPIC", RAW_TRADES),
+        AGGREGATED_TRADES: os.environ.get("AGGREGATED_TRADES_TOPIC", AGGREGATED_TRADES),
+        SIGNIFICANT_TRADES: os.environ.get("SIGNIFICANT_TRADES_TOPIC", SIGNIFICANT_TRADES),
+    }
+    return {stream: PubSubPublisher(project_id, topics[stream]) for stream in get_publish_streams()}
+
+
+def get_trade_handler(
+    publishers: dict[str, PubSubPublisher],
+    significant_trade_filter: int = 1_000,
+) -> Callable[[TradeEvent], Awaitable[None]]:
+    """Return a trade event handler."""
+    significant_callback = None
+    if SIGNIFICANT_TRADES in publishers:
+        significant_callback = SignificantTradeCallback(
+            publishers[SIGNIFICANT_TRADES],
+            significant_trade_filter=significant_trade_filter,
+            window_seconds=60,
+        )
+
+    async def handle_aggregated_trade(trade: dict, timestamp: float) -> None:
+        if AGGREGATED_TRADES in publishers:
+            await publishers[AGGREGATED_TRADES](trade, timestamp)
+        if significant_callback is not None:
+            await significant_callback(trade, timestamp)
+
+    aggregate_callback = TradeCallback(handle_aggregated_trade)
+
+    async def handle_trade(trade: TradeEvent) -> None:
+        payload = trade.to_dict()
+        timestamp = trade.received_at.timestamp()
+        if RAW_TRADES in publishers:
+            await publishers[RAW_TRADES](payload, timestamp)
+        if AGGREGATED_TRADES in publishers or SIGNIFICANT_TRADES in publishers:
+            await aggregate_callback(payload, timestamp)
+
+    return handle_trade
+
+
+async def run() -> None:
+    """Run all exchange websocket clients."""
+    publishers = get_publishers(os.environ["PROJECT_ID"])
+    significant_trade_filter = int(os.environ.get("SIGNIFICANT_TRADE_FILTER", 1_000))
+    handler = get_trade_handler(publishers, significant_trade_filter)
+    await run_clients(
+        [
+            (Binance(get_csv_env("BINANCE_SYMBOLS", ["BTCUSDT"])), handler),
+            (Coinbase(get_csv_env("COINBASE_SYMBOLS", ["BTC-USD"])), handler),
+            (Bitfinex(get_csv_env("BITFINEX_SYMBOLS", ["tBTCUSD"])), handler),
+            (Bitmex(get_csv_env("BITMEX_SYMBOLS", ["XBTUSD"])), handler),
+        ]
     )
 
 
 if __name__ == "__main__":
-    sentry_sdk.init(config("SENTRY_DSN"), traces_sample_rate=1.0)
+    load_dotenv()
+    sentry_dsn = os.environ.get("SENTRY_DSN")
+    if sentry_dsn:
+        import sentry_sdk
 
-    fh = FeedHandler()
+        sentry_sdk.init(sentry_dsn, traces_sample_rate=1.0)
 
-    for exchange, symbols in sequential_integer_exchanges.items():
-        callback = SequentialIntegerTradeCallback(get_callback(exchange))
-        fh.add_feed(
-            exchange(
-                symbols=symbols,
-                channels=[TRADES],
-                callbacks={TRADES: callback},
-            )
-        )
-    for exchange, symbols in non_sequential_integer_exchanges.items():
-        callback = NonSequentialIntegerTradeCallback(get_callback(exchange))
-        fh.add_feed(
-            exchange(
-                symbols=symbols,
-                channels=[TRADES],
-                callbacks={TRADES: callback},
-            )
-        )
-    for exchange, symbols in other_exchanges.items():
-        callback = TradeCallback(get_callback(exchange))
-        fh.add_feed(
-            exchange(
-                symbols=symbols,
-                channels=[TRADES],
-                callbacks={TRADES: callback},
-            )
-        )
-
-    fh.run()
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass

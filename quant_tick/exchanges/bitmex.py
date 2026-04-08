@@ -1,86 +1,36 @@
-from collections import defaultdict
+from collections.abc import AsyncIterator
 from decimal import Decimal
-from typing import Dict, Tuple
 
-from cryptofeed.defines import BUY, FUTURES, PERPETUAL, SPOT, TRADES
-from cryptofeed.exchanges import Bitmex as BaseBitmex
-from cryptofeed.exchanges.bitmex import LOG
-from cryptofeed.symbols import Symbol
-
-from ..feed import Feed
+from ..events import TradeEvent
+from ..client import ExchangeClient
 
 
-class Bitmex(Feed, BaseBitmex):
-    """Bitmex."""
+class Bitmex(ExchangeClient):
+    """BitMEX trade websocket feed."""
 
-    @classmethod
-    def _parse_symbol_data(cls, data: dict) -> Tuple[Dict, Dict]:
-        """Parse symbol data."""
-        ret = {}
-        info = defaultdict(dict)
+    exchange = "bitmex"
+    url = "wss://ws.bitmex.com/realtime"
 
-        for entry in data:
-            base = entry["rootSymbol"].replace("XBT", "BTC")
-            quote = entry["quoteCurrency"].replace("XBT", "BTC")
+    def subscription_messages(self) -> list[dict]:
+        """Return subscription messages."""
+        return [{"op": "subscribe", "args": [f"trade:{symbol}" for symbol in self.symbols]}]
 
-            if entry["typ"] == "FFWCSX":
-                stype = PERPETUAL
-            elif entry["typ"] == "FFCCSX":
-                stype = FUTURES
-            elif entry["typ"] == "IFXXXP":
-                stype = SPOT
-            else:
-                LOG.info(
-                    "Unsupported type %s for instrument %s",
-                    entry["typ"],
-                    entry["symbol"],
+    async def trades(self) -> AsyncIterator[TradeEvent]:
+        """Yield normalized trade events."""
+        async for msg, received_at in self.messages():
+            if msg.get("table") != "trade" or msg.get("action") != "insert":
+                continue
+            for data in msg["data"]:
+                price = Decimal(str(data["price"]))
+                notional = data.get("homeNotional")
+                if notional is None:
+                    notional = Decimal(str(data["foreignNotional"])) / price
+                yield self.get_trade_event(
+                    uid=data["trdMatchID"],
+                    symbol=data["symbol"],
+                    timestamp=self.parse_datetime(data["timestamp"]),
+                    received_at=received_at,
+                    price=price,
+                    notional=notional,
+                    tick_rule=1 if data["side"].lower() == "buy" else -1,
                 )
-
-            # region custom
-            s = Symbol(base, quote, type=stype, expiry_date=entry.get("expiry"))
-            # endregion
-            if s.normalized not in ret:
-                ret[s.normalized] = entry["symbol"]
-                info["tick_size"][s.normalized] = entry["tickSize"]
-                info["instrument_type"][s.normalized] = stype
-                info["is_quanto"][s.normalized] = entry["isQuanto"]
-            else:
-                LOG.info(
-                    "Ignoring duplicate symbol mapping %s<=>%s",
-                    s.normalized,
-                    entry["symbol"],
-                )
-
-        return ret, info
-
-    async def _trade(self, msg: dict, timestamp: float) -> Tuple[str, dict, float]:
-        """
-        trade msg example
-        {
-            'timestamp': '2018-05-19T12:25:26.632Z',
-            'symbol': 'XBTUSD',
-            'side': 'Buy',
-            'size': 40,
-            'price': 8335,
-            'tickDirection': 'PlusTick',
-            'trdMatchID': '5f4ecd49-f87f-41c0-06e3-4a9405b9cdde',
-            'grossValue': 479920,
-            'homeNotional': Decimal('0.0047992'),
-            'foreignNotional': 40
-        }
-        """
-        for data in msg["data"]:
-            price = Decimal(data["price"])
-            volume = Decimal(data["foreignNotional"])
-            notional = volume / price
-            t = {
-                "exchange": self.id.lower(),
-                "uid": data["trdMatchID"],
-                "symbol": data["symbol"],
-                "timestamp": self.parse_datetime(data["timestamp"]),
-                "price": price,
-                "volume": volume,
-                "notional": notional,
-                "tickRule": 1 if data["side"].lower() == BUY else -1,
-            }
-            await self.callback(TRADES, t, timestamp)

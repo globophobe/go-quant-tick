@@ -1,6 +1,6 @@
 # What?
 
-Asyncio Quant Tick aggregates candlesticks from high frequency tick data from WebSockets.
+Asyncio Quant Tick aggregates high frequency tick data from WebSockets.
 
 # How?
 
@@ -8,7 +8,9 @@ Sequences of trades that have equal symbol, timestamp, and tick rule are aggrega
 
 As well, the number of messages can be reduced by 30-50%
 
-By filtering aggregated messages, for example only emitting a mesage when an aggregated trade is greater than or equal to a `significant_trade_filter`, the number of messages can be reduced more.
+By filtering aggregated messages, for example only emitting a message when an aggregated trade is greater than or equal to a `significant_trade_filter`, the number of messages can be reduced more.
+
+Messages can optionally be published to GCP Pub/Sub.
 
 Example
 -------
@@ -62,8 +64,6 @@ Information related to the first trade is aggregated with the second.
 ]
 ```
 
-For 1m, 5m, 15m candles, there is an optional parameter `window_seconds`.  
-
 For settings, see the [examples](https://github.com/globophobe/asyncio-quant-tick/blob/main/examples/)
 
 Supported exchanges
@@ -73,17 +73,11 @@ Supported exchanges
 
 :white_check_mark: Bitfinex
 
-:white_check_mark: Bitflyer
-
 :white_check_mark: BitMEX
 
-:white_check_mark: Bybit
-
 :white_check_mark: Coinbase Pro
-
-:white_check_mark: Upbit
 
 Contributing
 ------------
 
-Install dependencies with `poetry install`. The docker example is built with [invoke tasks](https://github.com/globophobe/asyncio-quant-tick/blob/master/tasks.py). For example, `invoke build`
+Install dependencies with `uv sync`. The docker example is built with [invoke tasks](https://github.com/globophobe/asyncio-quant-tick/blob/master/tasks.py). For example, `invoke build-container`

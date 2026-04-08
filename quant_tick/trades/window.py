@@ -1,7 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
-
-from dateutil.relativedelta import relativedelta
 
 
 class WindowMixin:
@@ -9,11 +7,14 @@ class WindowMixin:
 
     def get_start(self, timestamp: datetime) -> datetime:
         """Get start."""
-        return timestamp.replace(second=0, microsecond=0, nanosecond=0)
+        try:
+            return timestamp.replace(second=0, microsecond=0, nanosecond=0)
+        except TypeError:
+            return timestamp.replace(second=0, microsecond=0)
 
     def get_stop(self, timestamp: datetime) -> datetime:
         """Get stop."""
-        return timestamp + relativedelta(seconds=self.window_seconds)
+        return timestamp + timedelta(seconds=self.window_seconds)
 
     def get_window(self, symbol: str, timestamp: datetime) -> datetime:
         """Get window."""

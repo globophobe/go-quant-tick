@@ -1,4 +1,5 @@
 __pycache__/
 dist/
-feedhandler.log
 .env
+*.egg-info/
+requirements.txt

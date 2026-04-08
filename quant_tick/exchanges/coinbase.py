@@ -1,77 +1,46 @@
-from decimal import Decimal
-from typing import Any
+from collections.abc import AsyncIterator
 
-from cryptofeed.defines import ASK, BID, L3_BOOK, SELL, TRADES
-from cryptofeed.exchanges import Coinbase as BaseCoinbase
-
-from ..feed import Feed
+from ..events import TradeEvent
+from ..client import ExchangeClient
 
 
-class Coinbase(Feed, BaseCoinbase):
-    async def _book_update(self, msg: dict, timestamp: float) -> Any:
-        """
-        {
-            'type': 'match', or last_match
-            'trade_id': 43736593
-            'maker_order_id': '2663b65f-b74e-4513-909d-975e3910cf22',
-            'taker_order_id': 'd058d737-87f1-4763-bbb4-c2ccf2a40bde',
-            'side': 'buy',
-            'size': '0.01235647',
-            'price': '8506.26000000',
-            'product_id': 'BTC-USD',
-            'sequence': 5928276661,
-            'time': '2018-05-21T00:26:05.585000Z'
-        }
-        """
-        pair = msg["product_id"]
-        ts = self.timestamp_normalize(msg["time"])
+class Coinbase(ExchangeClient):
+    """Coinbase match websocket feed."""
 
-        if (
-            self.keep_l3_book
-            and "full" in self.subscription
-            and pair in self.subscription["full"]
-        ):
-            delta = {BID: [], ASK: []}
-            price = Decimal(msg["price"])
-            side = ASK if msg["side"] == "sell" else BID
-            size = Decimal(msg["size"])
-            maker_order_id = msg["maker_order_id"]
+    exchange = "coinbase"
+    url = "wss://ws-feed.exchange.coinbase.com"
 
-            _, new_size = self.order_map[maker_order_id]
-            new_size -= size
-            if new_size <= 0:
-                del self.order_map[maker_order_id]
-                self.order_type_map.pop(maker_order_id, None)
-                delta[side].append((maker_order_id, price, 0))
-                del self._l3_book[pair].book[side][price][maker_order_id]
-                if len(self._l3_book[pair].book[side][price]) == 0:
-                    del self._l3_book[pair].book[side][price]
-            else:
-                self.order_map[maker_order_id] = (price, new_size)
-                self._l3_book[pair].book[side][price][maker_order_id] = new_size
-                delta[side].append((maker_order_id, price, new_size))
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialize."""
+        super().__init__(symbols)
+        self.last_ids: dict[str, int] = {}
 
-            await self.book_callback(
-                L3_BOOK,
-                self._l3_book[pair],
-                timestamp,
-                timestamp=ts,
-                delta=delta,
-                raw=msg,
-                sequence_number=self.seq_no[pair],
+    def subscription_messages(self) -> list[dict]:
+        """Return subscription messages."""
+        return [
+            {
+                "type": "subscribe",
+                "product_ids": self.symbols,
+                "channels": ["matches"],
+            }
+        ]
+
+    async def trades(self) -> AsyncIterator[TradeEvent]:
+        """Yield normalized match events."""
+        async for msg, received_at in self.messages():
+            if msg.get("type") not in ("match", "last_match"):
+                continue
+            symbol = msg["product_id"]
+            trade_id = int(msg["trade_id"])
+            prev_trade_id = self.last_ids.get(symbol)
+            self.last_ids[symbol] = trade_id
+            yield self.get_trade_event(
+                uid=trade_id,
+                symbol=symbol,
+                timestamp=self.parse_datetime(msg["time"]),
+                received_at=received_at,
+                price=msg["price"],
+                notional=msg["size"],
+                tick_rule=-1 if msg["side"].lower() == "sell" else 1,
+                is_sequential=prev_trade_id is None or trade_id == prev_trade_id + 1,
             )
-
-        price = Decimal(msg["price"])
-        notional = Decimal(msg["size"])
-        volume = price * notional
-        t = {
-            "exchange": self.id.lower(),
-            "uid": int(msg["trade_id"]),
-            "symbol": msg["product_id"],  # Do not normalize
-            "timestamp": self.parse_datetime(msg["time"]),
-            "price": price,
-            "volume": volume,
-            "notional": notional,
-            "tickRule": 1 if msg["side"].lower() == SELL else -1,
-        }
-        await self.callback(TRADES, t, ts)
