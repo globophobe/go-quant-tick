@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dotenv import load_dotenv
 
 from quant_tick.events import TradeEvent
-from quant_tick.exchanges import Binance, Bitfinex, Bitmex, Coinbase
+from quant_tick.exchanges import Binance, Bitfinex, Bitmex, Coinbase, Hyperliquid
 from quant_tick.pipeline import run_clients
 from quant_tick.pubsub import PubSubPublisher
 from quant_tick.trades import (
@@ -90,6 +90,7 @@ async def run() -> None:
             (Coinbase(get_csv_env("COINBASE_SYMBOLS", ["BTC-USD"])), handler),
             (Bitfinex(get_csv_env("BITFINEX_SYMBOLS", ["tBTCUSD"])), handler),
             (Bitmex(get_csv_env("BITMEX_SYMBOLS", ["XBTUSD"])), handler),
+            (Hyperliquid(get_csv_env("HYPERLIQUID_SYMBOLS", ["BTC"])), handler),
         ]
     )
 
