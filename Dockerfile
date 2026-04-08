@@ -1,20 +1,19 @@
-FROM python:3.9-slim-buster
+FROM python:3.12-slim-bookworm
 
-ARG POETRY_EXPORT
+ARG WHEEL
 ARG PROJECT_ID
 ARG SENTRY_DSN
 
-ENV PROJECT_ID $PROJECT_ID
-ENV SENTRY_DSN $SENTRY_DSN
+ENV PROJECT_ID=$PROJECT_ID
+ENV SENTRY_DSN=$SENTRY_DSN
 
-ADD quant_tick /quant_tick/
-ADD main.py /
+COPY requirements.txt /tmp/requirements.txt
+COPY dist/${WHEEL} /tmp/${WHEEL}
+COPY main.py /
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && pip install --no-cache-dir $POETRY_EXPORT \
-    && apt-get purge -y --auto-remove build-essential \
-    && apt-get clean  \
-    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip install --no-cache-dir /tmp/${WHEEL} \
+    && rm /tmp/requirements.txt /tmp/${WHEEL}
 
 ENTRYPOINT ["/main.py"]
