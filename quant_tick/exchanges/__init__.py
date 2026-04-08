@@ -5,7 +5,7 @@ from .coinbase import Coinbase
 
 __all__ = [
     "Binance",
-    "Bitmex",
     "Bitfinex",
-    "Coinbase"
+    "Bitmex",
+    "Coinbase",
 ]

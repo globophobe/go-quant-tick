@@ -1,54 +1,73 @@
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Tuple
+import logging
+from collections.abc import AsyncIterator
 
-import pandas as pd
-from cryptofeed.defines import TRADES
-from cryptofeed.exchanges import Bitfinex as BaseBitfinex
-from cryptofeed.exchanges.bitfinex import LOG
+from ..events import TradeEvent
+from ..client import ExchangeClient
 
-from ..feed import Feed
+LOG = logging.getLogger(__name__)
 
 
-class Bitfinex(Feed, BaseBitfinex):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_initialized = False
+class Bitfinex(ExchangeClient):
+    """Bitfinex trades websocket feed."""
 
-    def parse_datetime(self, value: int, unit: str = "ms") -> datetime:
-        """Parse datetime with pandas."""
-        return pd.Timestamp(value, unit=unit).replace(tzinfo=timezone.utc)
+    exchange = "bitfinex"
+    url = "wss://api-pub.bitfinex.com/ws/2"
 
-    async def _trades(
-        self, pair: str, msg: list, timestamp: float
-    ) -> Tuple[str, dict, float]:
-        async def _trade_update(trade: list, timestamp: float):
-            uid, ts, notional, price = trade
-            price = Decimal(price)
-            volume = price * abs(notional)
-            t = {
-                "exchange": self.id.lower(),
-                "uid": uid,
-                "symbol": pair,
-                "timestamp": self.parse_datetime(ts),
-                "price": price,
-                "volume": volume,
-                "notional": abs(notional),
-                "tickRule": -1 if notional < 0 else 1,
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialize."""
+        super().__init__(symbols)
+        self.channel_symbols: dict[int, str] = {}
+        self.last_ids: dict[str, int] = {}
+
+    def subscription_messages(self) -> list[dict]:
+        """Return subscription messages."""
+        return [
+            {
+                "event": "subscribe",
+                "channel": "trades",
+                "symbol": self.get_api_symbol(symbol),
             }
-            await self.callback(TRADES, t, timestamp)
+            for symbol in self.symbols
+        ]
 
-        # Drop first message.
-        if self.is_initialized:
-            if isinstance(msg[1], list):
-                # Snapshot.
-                for trade in msg[1]:
-                    await _trade_update(trade, timestamp)
-            elif msg[1] in ("te", "fte"):
-                # Update.
-                await _trade_update(msg[2], timestamp)
-            elif msg[1] not in ("tu", "ftu", "hb"):
-                # Ignore trade updates and heartbeats.
-                LOG.warning("%s %s: Unexpected trade message %s", self.id, pair, msg)
-        else:
-            self.is_initialized = True
+    def get_api_symbol(self, symbol: str) -> str:
+        """Return Bitfinex API symbol."""
+        return symbol if symbol.startswith("t") else f"t{symbol}"
+
+    async def trades(self) -> AsyncIterator[TradeEvent]:
+        """Yield normalized trade events."""
+        async for msg, received_at in self.messages():
+            if isinstance(msg, dict):
+                if msg.get("event") == "subscribed":
+                    self.channel_symbols[msg["chanId"]] = msg["symbol"]
+                elif msg.get("event") == "error":
+                    LOG.warning("%s subscription error: %s", self.exchange, msg)
+                continue
+            if not isinstance(msg, list) or len(msg) < 2:
+                continue
+            channel_id = msg[0]
+            symbol = self.channel_symbols.get(channel_id)
+            if symbol is None:
+                continue
+            tag = msg[1]
+            if tag in ("hb", "tu"):
+                continue
+            if isinstance(tag, list):
+                continue
+            if tag != "te" or len(msg) < 3:
+                LOG.warning("%s %s unexpected trade message: %s", self.exchange, symbol, msg)
+                continue
+            uid, ts, notional, price = msg[2]
+            trade_id = int(uid)
+            prev_trade_id = self.last_ids.get(symbol)
+            self.last_ids[symbol] = trade_id
+            yield self.get_trade_event(
+                uid=trade_id,
+                symbol=symbol,
+                timestamp=self.parse_datetime(ts),
+                received_at=received_at,
+                price=price,
+                notional=abs(notional),
+                tick_rule=-1 if notional < 0 else 1,
+                is_sequential=prev_trade_id is None or trade_id > prev_trade_id,
+            )
