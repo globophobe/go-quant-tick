@@ -8,19 +8,19 @@ LOG = logging.getLogger(__name__)
 
 
 class Bitfinex(ExchangeClient):
-    """Bitfinex trades websocket feed."""
+    """Bitfinex trade websocket client."""
 
     exchange = "bitfinex"
     url = "wss://api-pub.bitfinex.com/ws/2"
 
     def __init__(self, symbols: list[str]) -> None:
-        """Initialize."""
+        """Initialize channel and trade ID tracking."""
         super().__init__(symbols)
         self.channel_symbols: dict[int, str] = {}
         self.last_ids: dict[str, int] = {}
 
     def subscription_messages(self) -> list[dict]:
-        """Return subscription messages."""
+        """Subscribe to trade channels."""
         return [
             {
                 "event": "subscribe",
@@ -35,7 +35,7 @@ class Bitfinex(ExchangeClient):
         return symbol if symbol.startswith("t") else f"t{symbol}"
 
     async def trades(self) -> AsyncIterator[TradeEvent]:
-        """Yield normalized trade events."""
+        """Yield normalized Bitfinex trade execution events."""
         async for msg, received_at in self.messages():
             if isinstance(msg, dict):
                 if msg.get("event") == "subscribed":

@@ -5,18 +5,18 @@ from ..client import ExchangeClient
 
 
 class Coinbase(ExchangeClient):
-    """Coinbase match websocket feed."""
+    """Coinbase match websocket client."""
 
     exchange = "coinbase"
     url = "wss://ws-feed.exchange.coinbase.com"
 
     def __init__(self, symbols: list[str]) -> None:
-        """Initialize."""
+        """Initialize trade ID tracking."""
         super().__init__(symbols)
         self.last_ids: dict[str, int] = {}
 
     def subscription_messages(self) -> list[dict]:
-        """Return subscription messages."""
+        """Subscribe to match messages."""
         return [
             {
                 "type": "subscribe",
@@ -26,7 +26,7 @@ class Coinbase(ExchangeClient):
         ]
 
     async def trades(self) -> AsyncIterator[TradeEvent]:
-        """Yield normalized match events."""
+        """Yield normalized Coinbase matches."""
         async for msg, received_at in self.messages():
             if msg.get("type") not in ("match", "last_match"):
                 continue

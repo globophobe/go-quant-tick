@@ -5,18 +5,18 @@ from ..client import ExchangeClient
 
 
 class Binance(ExchangeClient):
-    """Binance aggregate trade websocket feed."""
+    """Binance aggregate-trade websocket client."""
 
     exchange = "binance"
     url = "wss://stream.binance.com:9443/ws"
 
     def __init__(self, symbols: list[str]) -> None:
-        """Initialize."""
+        """Initialize aggregate-trade ID tracking."""
         super().__init__(symbols)
         self.last_ids: dict[str, int] = {}
 
     def subscription_messages(self) -> list[dict]:
-        """Return subscription messages."""
+        """Subscribe to aggregate trade streams."""
         return [
             {
                 "method": "SUBSCRIBE",
@@ -26,7 +26,7 @@ class Binance(ExchangeClient):
         ]
 
     async def trades(self) -> AsyncIterator[TradeEvent]:
-        """Yield normalized aggregate trade events."""
+        """Yield normalized Binance aggregate trades."""
         async for msg, received_at in self.messages():
             if msg.get("e") != "aggTrade":
                 continue

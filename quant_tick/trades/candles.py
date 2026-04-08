@@ -5,23 +5,20 @@ from .window import WindowMixin
 
 
 class CandleCallback(WindowMixin):
-    """Candle callback."""
+    """Aggregate significant-trade payloads into windowed candles."""
 
     def __init__(self, handler: Callable, window_seconds: int = 60) -> None:
-        """Init."""
         self.handler = handler
         self.window_seconds = window_seconds
         self.window = {}
         self.trades = {}
 
     async def __call__(self, trade: dict, timestamp: float) -> Tuple[dict, float]:
-        """Call."""
         candle = self.main(trade)
         if candle is not None:
             await self.handler(candle, timestamp)
 
     def main(self, trade: dict) -> Optional[dict]:
-        """Main."""
         symbol = trade["symbol"]
         timestamp = trade["timestamp"]
         self.trades.setdefault(symbol, [])
@@ -43,7 +40,6 @@ class CandleCallback(WindowMixin):
             self.trades[symbol].append(trade)
 
     def aggregate(self, trades: List[dict], is_late: bool = False) -> Optional[dict]:
-        """Aggregate."""
         first_trade = trades[0]
         prices = self.get_prices(trades)
         return {
@@ -63,7 +59,6 @@ class CandleCallback(WindowMixin):
         }
 
     def get_prices(self, trades: List[dict]) -> List[Decimal]:
-        """Get prices."""
         prices = []
         for trade in trades:
             for key in ("price", "high", "low"):

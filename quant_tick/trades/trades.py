@@ -9,12 +9,10 @@ class TradeCallback:
     """
 
     def __init__(self, handler: Callable) -> None:
-        """Initialize."""
         self.handler = handler
         self.trades = {}
 
     async def __call__(self, trade: dict, timestamp: float) -> Tuple[dict, float]:
-        """Call."""
         t = self.main(trade)
         if t is not None:
             await self.handler(t, timestamp)
@@ -25,7 +23,6 @@ class TradeCallback:
         return self.aggregate(t)
 
     def prepare_trade(self, trade: dict) -> dict:
-        """Prepare trade."""
         if "ticks" not in trade:
             trade["ticks"] = 1  # b/c Binance
         if "isSequential" not in trade:
@@ -33,7 +30,6 @@ class TradeCallback:
         return trade
 
     def aggregate(self, trade: dict) -> Optional[dict]:
-        """Aggregate."""
         symbol = trade["symbol"]
         trades = self.trades.setdefault(symbol, [])
         if not len(trades):
@@ -49,7 +45,6 @@ class TradeCallback:
             return aggregated
 
     def get_aggregated_trade(self, symbol: str) -> dict:
-        """Get aggregated trade."""
         trades = self.trades[symbol]
         from copy import copy
 
@@ -70,15 +65,13 @@ class TradeCallback:
 
 
 class SequentialIntegerTradeCallback(TradeCallback):
-    """Coinbase has sequential IDs"""
+    """Track contiguous integer IDs."""
 
     def __init__(self, *args, **kwargs) -> None:
-        """Initialize."""
         super().__init__(*args, **kwargs)
         self.uids = {}
 
     def main(self, trade: dict) -> dict:
-        """Main."""
         t = self.prepare_trade(trade)
         symbol = t["symbol"]
         uid = self.uids.get(symbol, None)
@@ -91,15 +84,13 @@ class SequentialIntegerTradeCallback(TradeCallback):
 
 
 class NonSequentialIntegerTradeCallback(TradeCallback):
-    """Bitfinex has non-sequential IDs"""
+    """Track monotonic but non-contiguous integer IDs."""
 
     def __init__(self, *args, **kwargs) -> None:
-        """Initialize."""
         super().__init__(*args, **kwargs)
         self.uids = {}
 
     def main(self, trade: dict) -> dict:
-        """Main."""
         t = self.prepare_trade(trade)
         symbol = t["symbol"]
         uid = self.uids.get(symbol, None)
