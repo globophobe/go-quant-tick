@@ -1,77 +1,38 @@
-[tool.poetry]
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
 name = "asyncio-quant-tick"
 version = "0.1.7"
 description = "Asyncio Quant Tick aggregates candlesticks from high frequency tick data from WebSockets"
-authors = ["Alex <globophobe@gmail.com>"]
 readme = "README.md"
-license = "MIT"
-homepage = "https://github.com/globophobe/asyncio-quant-tick"
-repository = "https://github.com/globophobe/asyncio-quant-tick"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Alex", email = "globophobe@gmail.com" }]
 keywords = ["quant", "trading", "trading-strategies", "coinbase", "bitfinex", "bitmex", "bybit"]
 classifiers = ["Development Status :: 4 - Beta", "Operating System :: OS Independent"]
-packages = [{ include = "quant_tick" }]
-
-[tool.poetry.dependencies]
-python = ">=3.10,<4"
-cryptofeed = { git = "https://github.com/bmoscon/cryptofeed.git", branch = "master" }
-pandas = "*"
-orjson = "*"
-
-[tool.poetry.dev-dependencies]
-invoke = "*"
-python-decouple = "*"
-ruff = "*"
-sentry-sdk = "*"
-
-[tool.ruff]
-ignore = [
-    "ANN002", # Missing type annotation for *{name}
-    "ANN003", # Missing type annotation for **{name}
-    "ANN101", # Missing type annotation for {name} in method
-    "ANN102", # Missing type annotation for {name} in classmethod
-    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed in {name}
-    "B007", # Loop control variable not used within loop body
-    "B904", # Within an except clause, raise exceptions with...
-    "D100", # Missing docstring in public module
-    "D104", # Missing docstring in public package
-    "D106", # Missing docstring in public nested class, i.e. Meta
-    "D203", # 1 blank line required before class docstring
-    "D205", # 1 blank line required between summary line and description
-    "D212", # Multi-line docstring summary should start at the first line
-    "D213", # Multi-line docstring summary should start at the second line
-    "D400", # First line should end with a period
-    "D401", # First line should be in imperative mood
-    "D403", # First word of the first line should be properly capitalized
-    "D404", # First word of the docstring should not be This
-    "D406", # Section name should end with a newline
-    "D407", # Missing dashed underline after section
-    "D411", # Missing blank line before section
-    "D413", # Missing blank line after last section
-    "D415", # First line should end with a period, question mark, or exclamation point
-    "D417", # Missing argument description in the docstring: {name}
-    "N803", # Argument name should be lowercase
-    "N806", # Variable in function should be lowercase
-    "PTH123", # open() should be replaced by Path.open()
+dependencies = [
+    "python-dotenv>=1.1.1",
+    "websockets>=15,<16",
 ]
-line-length = 119
-select = [
-    "ANN", # flake8-annotations
-    "B", # flake8-bugbear
-    "D", # pydocstyle
-    "E", # pycodestyle
-    "F", # Pyflakes
-    "I", # isort
-    "INT", # flake8-gettext
-    "N", # pep8-naming
-    "PTH", # flake8-use-pathlib
-    "UP", # pyupgrade
-    "W", # pycodestyle
+
+[project.optional-dependencies]
+gcp = ["google-cloud-pubsub>=2.33.0"]
+
+[project.urls]
+Homepage = "https://github.com/globophobe/asyncio-quant-tick"
+Repository = "https://github.com/globophobe/asyncio-quant-tick"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quant_tick"]
+
+[dependency-groups]
+deploy = ["sentry-sdk>=2.39.0"]
+dev = [
+    "invoke>=2.2.1",
+    "ruff>=0.15.2",
 ]
-unfixable = ["F401", "F841"]
 
-[tool.ruff.isort]
-known-first-party = ["quant_tick"]
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv]
+exclude-newer = "P7D"
