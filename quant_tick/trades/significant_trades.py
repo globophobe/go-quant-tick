@@ -93,8 +93,14 @@ class SignificantTradeCallback(WindowMixin):
             data = {
                 "exchange": last_trade["exchange"],
                 "symbol": last_trade["symbol"],
+                "uid": last_trade["uid"],
                 "timestamp": last_trade["timestamp"],
+                "nanoseconds": last_trade.get("nanoseconds", 0),
                 "price": last_trade["price"],
+                "volume": None,
+                "notional": None,
+                "tickRule": None,
+                "ticks": None,
                 "isSequential": all([t["isSequential"] for t in trades]),
             }
             data.update(stats)

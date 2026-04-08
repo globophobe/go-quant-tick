@@ -28,7 +28,6 @@ class TradeEvent:
             "symbol": self.symbol,
             "timestamp": self.timestamp,
             "nanoseconds": self.nanoseconds,
-            "receivedAt": self.received_at,
             "price": self.price,
             "volume": self.volume,
             "notional": self.notional,

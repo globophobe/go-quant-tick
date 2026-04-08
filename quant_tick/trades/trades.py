@@ -36,10 +36,14 @@ class TradeCallback:
             self.trades[symbol].append(trade)
         else:
             last_trade = trades[-1]
-            if last_trade["timestamp"] == trade["timestamp"]:
-                if last_trade["tickRule"] == trade["tickRule"]:
-                    self.trades[symbol].append(trade)
-                    return
+            is_same_sample = (
+                last_trade["timestamp"] == trade["timestamp"]
+                and last_trade.get("nanoseconds", 0) == trade.get("nanoseconds", 0)
+                and last_trade["tickRule"] == trade["tickRule"]
+            )
+            if is_same_sample:
+                self.trades[symbol].append(trade)
+                return
             aggregated = self.get_aggregated_trade(symbol)
             self.trades[symbol] = [trade]  # Next
             return aggregated
@@ -48,16 +52,18 @@ class TradeCallback:
         trades = self.trades[symbol]
         from copy import copy
 
+        first_trade = trades[0]
         last_trade = copy(trades[-1])
         # Is there more than 1 trade?
         if len(trades) > 1:
             # Assert
-            keys = ["timestamp", "tickRule"]
+            keys = ["timestamp", "nanoseconds", "tickRule"]
             if last_trade.get("symbol", None):
                 keys.append("symbol")
             for key in keys:
-                assert len(set([trade[key] for trade in trades])) == 1
+                assert len(set([trade.get(key, 0) for trade in trades])) == 1
             # Aggregate
+            last_trade["uid"] = first_trade["uid"]
             last_trade["volume"] = sum([trade["volume"] for trade in trades])
             last_trade["notional"] = sum([trade["notional"] for trade in trades])
             last_trade["ticks"] = sum([trade["ticks"] for trade in trades])
