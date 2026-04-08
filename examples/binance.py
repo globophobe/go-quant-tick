@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
-from cryptofeed import FeedHandler
-from cryptofeed.defines import TRADES
+import asyncio
 
+from quant_tick.console import get_significant_trade_handler
 from quant_tick.exchanges import Binance
-from quant_tick.trades import (
-    CandleCallback,
-    SequentialIntegerTradeCallback,
-    SignificantTradeCallback,
-)
 
 
-async def candles(candle: dict, timestamp: float) -> None:
-    """Candles."""
-    print(candle)
+async def main() -> None:
+    """Print Binance significant trade events."""
+    handler = get_significant_trade_handler()
+    async for trade in Binance(["BTCUSDT"]).trades():
+        await handler(trade)
 
 
 if __name__ == "__main__":
-    fh = FeedHandler()
-    fh.add_feed(
-        Binance(
-            symbols=["BTCUSDT"],
-            channels=[TRADES],
-            callbacks={
-                TRADES: SequentialIntegerTradeCallback(
-                    SignificantTradeCallback(
-                        CandleCallback(candles, window_seconds=60),
-                        significant_trade_filter=1_000,
-                        window_seconds=60,
-                    )
-                )
-            },
-        )
-    )
-    fh.run()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
