@@ -15,13 +15,13 @@ LOG = logging.getLogger(__name__)
 
 
 class ExchangeClient:
-    """Base websocket exchange client."""
+    """Base client for exchange trade WebSockets."""
 
     exchange = ""
     url = ""
 
     def __init__(self, symbols: list[str]) -> None:
-        """Initialize."""
+        """Store the subscribed exchange symbols."""
         self.symbols = symbols
 
     async def messages(self) -> AsyncIterator[tuple[Any, datetime]]:
@@ -48,7 +48,7 @@ class ExchangeClient:
             await asyncio.sleep(1)
 
     def loads(self, message: str | bytes) -> Any:
-        """Load websocket JSON message."""
+        """Decode a JSON websocket message."""
         if isinstance(message, bytes):
             message = message.decode()
         return json.loads(message)
@@ -99,9 +99,9 @@ class ExchangeClient:
         )
 
     def subscription_messages(self) -> list[dict]:
-        """Return websocket subscription messages."""
+        """Build exchange-specific subscription messages."""
         raise NotImplementedError
 
     async def trades(self) -> AsyncIterator[TradeEvent]:
-        """Yield normalized trade events."""
+        """Yield normalized trades from exchange-specific messages."""
         raise NotImplementedError

@@ -8,11 +8,11 @@ TradeHandler = Callable[[TradeEvent], Awaitable[None]]
 
 
 async def run_client(client: ExchangeClient, handler: TradeHandler) -> None:
-    """Run one exchange client."""
+    """Route one exchange client's trades into a handler."""
     async for trade in client.trades():
         await handler(trade)
 
 
 async def run_clients(clients: Iterable[tuple[ExchangeClient, TradeHandler]]) -> None:
-    """Run exchange clients concurrently."""
+    """Run exchange clients until they are cancelled."""
     await asyncio.gather(*(run_client(client, handler) for client, handler in clients))

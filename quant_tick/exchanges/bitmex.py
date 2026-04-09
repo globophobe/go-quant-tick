@@ -6,17 +6,17 @@ from ..client import ExchangeClient
 
 
 class Bitmex(ExchangeClient):
-    """BitMEX trade websocket feed."""
+    """BitMEX trade websocket client."""
 
     exchange = "bitmex"
     url = "wss://ws.bitmex.com/realtime"
 
     def subscription_messages(self) -> list[dict]:
-        """Return subscription messages."""
+        """Subscribe to trade tables."""
         return [{"op": "subscribe", "args": [f"trade:{symbol}" for symbol in self.symbols]}]
 
     async def trades(self) -> AsyncIterator[TradeEvent]:
-        """Yield normalized trade events."""
+        """Yield normalized BitMEX trades."""
         async for msg, received_at in self.messages():
             if msg.get("table") != "trade" or msg.get("action") != "insert":
                 continue

@@ -44,5 +44,12 @@ class MainTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(len(handler.payloads), 1)
         payload, _ = handler.payloads[0]
+        self.assertNotIn("receivedAt", payload)
+        self.assertEqual(payload["uid"], str(datetime(2026, 4, 8, 0, 0, 0, tzinfo=UTC).timestamp()))
+        self.assertEqual(payload["nanoseconds"], 0)
+        self.assertIsNone(payload["volume"])
+        self.assertIsNone(payload["notional"])
+        self.assertIsNone(payload["tickRule"])
+        self.assertIsNone(payload["ticks"])
         self.assertEqual(payload["totalVolume"], Decimal("100"))
         self.assertEqual(payload["timestamp"], datetime(2026, 4, 8, 0, 0, 0, tzinfo=UTC))

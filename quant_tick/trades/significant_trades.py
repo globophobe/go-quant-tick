@@ -7,7 +7,7 @@ from .window import WindowMixin
 
 
 class SignificantTradeCallback(WindowMixin):
-    """Significant trade callback."""
+    """Emit trades that exceed the volume filter with window context."""
 
     def __init__(
         self,
@@ -15,7 +15,6 @@ class SignificantTradeCallback(WindowMixin):
         significant_trade_filter: int = 1000,
         window_seconds: Optional[int] = None,
     ) -> None:
-        """Initialize."""
         self.handler = handler
         self.significant_trade_filter = Decimal(significant_trade_filter)
         self.trades = {}
@@ -23,7 +22,6 @@ class SignificantTradeCallback(WindowMixin):
         self.window = {}
 
     async def __call__(self, trade: dict, timestamp: float) -> Tuple[dict, float]:
-        """Call."""
         result = self.main(trade)
         if isinstance(result, list):
             for t in result:
@@ -32,7 +30,6 @@ class SignificantTradeCallback(WindowMixin):
             await self.handler(result, timestamp)
 
     def main(self, trade: dict) -> Optional[dict]:
-        """Main."""
         symbol = trade["symbol"]
         timestamp = trade["timestamp"]
         self.trades.setdefault(symbol, [])
@@ -65,7 +62,6 @@ class SignificantTradeCallback(WindowMixin):
             return self.get_significant_trade_or_tick(symbol, trade)
 
     def get_significant_trade_or_tick(self, symbol: str, trade: dict) -> Optional[dict]:
-        """Get significant trade or tick."""
         if trade[VOLUME] < self.significant_trade_filter:
             self.trades[symbol].append(trade)
         else:
@@ -73,7 +69,6 @@ class SignificantTradeCallback(WindowMixin):
             return self.get_tick(symbol)
 
     def aggregate(self, trades: List[dict], is_late: bool = False) -> Optional[dict]:
-        """Aggregate."""
         buy_trades = [t for t in trades if t["tickRule"] == 1]
         stats = {
             "high": max(t["price"] for t in trades),
@@ -98,8 +93,14 @@ class SignificantTradeCallback(WindowMixin):
             data = {
                 "exchange": last_trade["exchange"],
                 "symbol": last_trade["symbol"],
+                "uid": last_trade["uid"],
                 "timestamp": last_trade["timestamp"],
+                "nanoseconds": last_trade.get("nanoseconds", 0),
                 "price": last_trade["price"],
+                "volume": None,
+                "notional": None,
+                "tickRule": None,
+                "ticks": None,
                 "isSequential": all([t["isSequential"] for t in trades]),
             }
             data.update(stats)

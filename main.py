@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dotenv import load_dotenv
 
 from quant_tick.events import TradeEvent
-from quant_tick.exchanges import Binance, Bitfinex, Bitmex, Coinbase
+from quant_tick.exchanges import Binance, Bitfinex, Bitmex, Coinbase, Hyperliquid
 from quant_tick.pipeline import run_clients
 from quant_tick.pubsub import PubSubPublisher
 from quant_tick.trades import (
@@ -21,7 +21,7 @@ TRADE_STREAMS = {RAW_TRADES, AGGREGATED_TRADES, SIGNIFICANT_TRADES}
 
 
 def get_csv_env(name: str, default: Iterable[str]) -> list[str]:
-    """Return comma-separated env config."""
+    """Parse comma-separated environment values."""
     value = os.environ.get(name)
     if not value:
         return list(default)
@@ -29,7 +29,7 @@ def get_csv_env(name: str, default: Iterable[str]) -> list[str]:
 
 
 def get_publish_streams() -> set[str]:
-    """Return enabled Pub/Sub streams."""
+    """Read the enabled output stream names."""
     streams = set(get_csv_env("PUBLISH_STREAMS", [SIGNIFICANT_TRADES]))
     unknown = streams - TRADE_STREAMS
     if unknown:
@@ -38,7 +38,7 @@ def get_publish_streams() -> set[str]:
 
 
 def get_publishers(project_id: str) -> dict[str, PubSubPublisher]:
-    """Return configured Pub/Sub publishers."""
+    """Create one Pub/Sub publisher for each enabled stream."""
     topics = {
         RAW_TRADES: os.environ.get("RAW_TRADES_TOPIC", RAW_TRADES),
         AGGREGATED_TRADES: os.environ.get("AGGREGATED_TRADES_TOPIC", AGGREGATED_TRADES),
@@ -51,7 +51,7 @@ def get_trade_handler(
     publishers: dict[str, PubSubPublisher],
     significant_trade_filter: int = 1_000,
 ) -> Callable[[TradeEvent], Awaitable[None]]:
-    """Return a trade event handler."""
+    """Build the raw, aggregated, and significant trade pipeline."""
     significant_callback = None
     if SIGNIFICANT_TRADES in publishers:
         significant_callback = SignificantTradeCallback(
@@ -80,7 +80,7 @@ def get_trade_handler(
 
 
 async def run() -> None:
-    """Run all exchange websocket clients."""
+    """Connect configured exchanges and publish selected trade streams."""
     publishers = get_publishers(os.environ["PROJECT_ID"])
     significant_trade_filter = int(os.environ.get("SIGNIFICANT_TRADE_FILTER", 1_000))
     handler = get_trade_handler(publishers, significant_trade_filter)
@@ -90,6 +90,7 @@ async def run() -> None:
             (Coinbase(get_csv_env("COINBASE_SYMBOLS", ["BTC-USD"])), handler),
             (Bitfinex(get_csv_env("BITFINEX_SYMBOLS", ["tBTCUSD"])), handler),
             (Bitmex(get_csv_env("BITMEX_SYMBOLS", ["XBTUSD"])), handler),
+            (Hyperliquid(get_csv_env("HYPERLIQUID_SYMBOLS", ["BTC"])), handler),
         ]
     )
 

@@ -13,10 +13,10 @@ def create_pubsub(
     ctx: Any,
     topic: str,
     create_subscription: bool = False,
-    message_retention_duration: int = 0,
+    message_retention_duration: int = 60 * 60 * 24,
     retain_acked_messages: bool = False,
 ) -> None:
-    """Create Pub/Sub."""
+    """Create a Pub/Sub topic and optional same-name subscription."""
     from google.api_core.exceptions import AlreadyExists
     from google.cloud import pubsub_v1
     from google.protobuf.duration_pb2 import Duration
@@ -33,16 +33,15 @@ def create_pubsub(
         pass
 
     if create_subscription:
-        # Retain messages for 24 hours
-        message_retention_duration = Duration()
-        message_retention_duration.FromSeconds(60 * 60 * 24)
         request = {
             "name": subscription_path,
             "topic": topic_path,
             "enable_message_ordering": True,
         }
         if message_retention_duration:
-            request["message_retention_duration"] = message_retention_duration
+            retention = Duration()
+            retention.FromSeconds(message_retention_duration)
+            request["message_retention_duration"] = retention
         if retain_acked_messages:
             request["retain_acked_messages"] = True
         with subscriber:
@@ -53,7 +52,7 @@ def create_pubsub(
 
 
 def get_docker_secrets() -> str:
-    """Get docker secrets."""
+    """Build Docker args for deploy-time environment values."""
     build_args = [
         f'{secret}="{os.environ[secret]}"' for secret in ("PROJECT_ID", "SENTRY_DSN")
     ]
@@ -65,7 +64,7 @@ def get_container_name(
     image: str = "asyncio-quant-tick",
     tag: str | None = None,
 ) -> str:
-    """Get container name."""
+    """Build the GCR image name."""
     project_id = os.environ["PROJECT_ID"]
     container_name = f"{hostname}/{project_id}/{image}"
     if tag:
@@ -77,7 +76,7 @@ def get_container_name(
 def build_container(
     ctx: Any, hostname: str = "asia.gcr.io", image: str = "asyncio-quant-tick"
 ) -> None:
-    """Build container."""
+    """Build the deploy container from the latest wheel."""
     wheel = build_quant_tick(ctx)
     requirements = Path("requirements.txt")
     ctx.run(
@@ -120,7 +119,7 @@ def build_quant_tick(ctx: Any) -> str:
 def push_container(
     ctx: Any, hostname: str = "asia.gcr.io", image: str = "asyncio-quant-tick"
 ) -> None:
-    """Push container."""
+    """Push the deploy container image."""
     name = get_container_name(hostname, image)
     ctx.run(f"docker push {name}")
 
@@ -133,7 +132,7 @@ def deploy_container(
     machine_type: str = "e2-micro",
     zone: str = "asia-northeast1-a",
 ) -> None:
-    """Deploy container."""
+    """Create the Compute Engine container instance."""
     container_name = container_name or get_container_name(tag="latest")
     service_account = os.environ["SERVICE_ACCOUNT"]
     # A best practice is to set the full cloud-platform access scope on the instance,
@@ -155,7 +154,7 @@ def deploy_container(
 def update_container(
     ctx: Any, hostname: str = "asia.gcr.io", name: str = "asyncio-quant-tick"
 ) -> None:
-    """Update container."""
+    """Build, push, and restart the container instance."""
     build_container(ctx, hostname=hostname, image=name)
     push_container(ctx, hostname=hostname, image=name)
     ctx.run(f"gcloud compute instances reset {name}")

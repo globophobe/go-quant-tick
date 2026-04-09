@@ -10,7 +10,7 @@ As well, the number of messages can be reduced by 30-50%
 
 By filtering aggregated messages, for example only emitting a message when an aggregated trade is greater than or equal to a `significant_trade_filter`, the number of messages can be reduced more.
 
-Messages can optionally be published to GCP Pub/Sub.
+Additionally, messages can optionally be published to GCP Pub/Sub.
 
 Example
 -------
@@ -68,6 +68,8 @@ For settings, see the [examples](https://github.com/globophobe/asyncio-quant-tic
 
 Supported exchanges
 -------------------
+
+:white_check_mark: Hyperliquid
 
 :white_check_mark: Binance
 

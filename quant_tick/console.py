@@ -5,14 +5,14 @@ from .trades import SignificantTradeCallback, TradeCallback
 
 
 async def print_payload(payload: dict, timestamp: float) -> None:
-    """Print callback payloads."""
+    """Print one filtered trade payload."""
     print(payload)
 
 
 def get_significant_trade_handler(
     significant_trade_filter: int = 1_000,
 ) -> Callable[[TradeEvent], Awaitable[None]]:
-    """Print significant trades with one-minute context."""
+    """Build a console pipeline for significant trades with one-minute context."""
     callback = TradeCallback(
         SignificantTradeCallback(
             print_payload,

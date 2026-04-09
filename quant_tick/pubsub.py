@@ -6,7 +6,7 @@ from typing import Any
 
 
 def default_json(value: Any) -> str:
-    """Encode values that JSON does not handle natively."""
+    """Encode datetimes and decimals as strings."""
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Decimal):
@@ -18,7 +18,7 @@ class PubSubPublisher:
     """Publish trade payloads to Google Pub/Sub."""
 
     def __init__(self, project_id: str, topic: str) -> None:
-        """Initialize."""
+        """Create a Pub/Sub publisher for a topic."""
         try:
             from google.cloud import pubsub_v1
         except ImportError as exc:
@@ -30,11 +30,11 @@ class PubSubPublisher:
         self.topic_path = self.publisher.topic_path(project_id, topic)
 
     async def __call__(self, payload: dict, timestamp: float) -> None:
-        """Publish a callback payload."""
+        """Publish a pipeline callback payload."""
         await self.publish(payload)
 
     async def publish(self, payload: dict) -> None:
-        """Publish a payload and wait for Pub/Sub acknowledgement."""
+        """Publish a payload and wait for acknowledgement."""
         data = json.dumps(payload, default=default_json, separators=(",", ":")).encode()
         ordering_key = self.get_ordering_key(payload)
         future = self.publisher.publish(
@@ -47,7 +47,7 @@ class PubSubPublisher:
         await asyncio.to_thread(future.result)
 
     def get_ordering_key(self, payload: dict) -> str:
-        """Return the Pub/Sub ordering key."""
+        """Order messages independently per exchange symbol."""
         exchange = payload.get("exchange", "")
         symbol = payload.get("symbol", "")
         return f"{exchange}:{symbol}"

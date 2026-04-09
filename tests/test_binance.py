@@ -3,60 +3,61 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest import IsolatedAsyncioTestCase
 
-from quant_tick.exchanges import Coinbase
+from quant_tick.exchanges import Binance
 
 
-class CoinbaseFixture(Coinbase):
-    """Coinbase client with fixture messages."""
+class BinanceFixture(Binance):
+    """Binance client with fixture messages."""
 
     async def messages(self) -> AsyncIterator[tuple[dict, datetime]]:
         """Yield fixture websocket messages."""
         received_at = datetime(2026, 4, 8, tzinfo=UTC)
         messages = [
             {
-                "type": "match",
-                "trade_id": 100,
-                "product_id": "BTC-USD",
-                "time": "2026-04-08T00:00:00Z",
-                "price": "100",
-                "size": "1",
-                "side": "buy",
+                "e": "trade",
+                "s": "BTCUSDT",
+                "t": 100,
+                "T": 1775606400000,
+                "p": "100",
+                "q": "1",
+                "m": False,
             },
             {
-                "type": "match",
-                "trade_id": 101,
-                "product_id": "BTC-USD",
-                "time": "2026-04-08T00:00:01Z",
-                "price": "101",
-                "size": "2",
-                "side": "sell",
+                "e": "trade",
+                "s": "BTCUSDT",
+                "t": 101,
+                "T": 1775606401000,
+                "p": "101",
+                "q": "2",
+                "m": True,
             },
             {
-                "type": "match",
-                "trade_id": 103,
-                "product_id": "BTC-USD",
-                "time": "2026-04-08T00:00:02Z",
-                "price": "102",
-                "size": "3",
-                "side": "buy",
+                "e": "trade",
+                "s": "BTCUSDT",
+                "t": 103,
+                "T": 1775606402000,
+                "p": "102",
+                "q": "3",
+                "m": False,
             },
         ]
         for message in messages:
             yield message, received_at
 
 
-class CoinbaseTests(IsolatedAsyncioTestCase):
-    async def test_coinbase_normalizes_trade_messages(self) -> None:
-        client = CoinbaseFixture(["BTC-USD"])
+class BinanceTests(IsolatedAsyncioTestCase):
+    async def test_binance_normalizes_trade_messages(self) -> None:
+        client = BinanceFixture(["BTCUSDT"])
         trades = []
         async for trade in client.trades():
             trades.append(trade)
 
         self.assertEqual(len(trades), 3)
         self.assertEqual([trade.uid for trade in trades], ["100", "101", "103"])
+        self.assertEqual([trade.ticks for trade in trades], [1, 1, 1])
         self.assertEqual([trade.is_sequential for trade in trades], [True, True, False])
-        self.assertEqual([trade.exchange for trade in trades], ["coinbase"] * 3)
-        self.assertEqual([trade.symbol for trade in trades], ["BTC-USD"] * 3)
+        self.assertEqual([trade.exchange for trade in trades], ["binance"] * 3)
+        self.assertEqual([trade.symbol for trade in trades], ["BTCUSDT"] * 3)
         self.assertEqual([trade.tick_rule for trade in trades], [1, -1, 1])
         self.assertEqual([trade.price for trade in trades], [Decimal("100"), Decimal("101"), Decimal("102")])
         self.assertEqual([trade.notional for trade in trades], [Decimal("1"), Decimal("2"), Decimal("3")])
@@ -67,8 +68,8 @@ class CoinbaseTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             [trade.timestamp for trade in trades],
             [
-                datetime(2026, 4, 8, 0, 0, 0, tzinfo=UTC),
-                datetime(2026, 4, 8, 0, 0, 1, tzinfo=UTC),
-                datetime(2026, 4, 8, 0, 0, 2, tzinfo=UTC),
+                datetime.fromtimestamp(1775606400, UTC),
+                datetime.fromtimestamp(1775606401, UTC),
+                datetime.fromtimestamp(1775606402, UTC),
             ],
         )

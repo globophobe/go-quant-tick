@@ -21,14 +21,13 @@ class TradeEvent:
     is_sequential: bool = False
 
     def to_dict(self) -> dict:
-        """Return the trade dict consumed by aggregation callbacks."""
+        """Convert the event to the aggregation payload shape."""
         return {
             "exchange": self.exchange,
             "uid": self.uid,
             "symbol": self.symbol,
             "timestamp": self.timestamp,
             "nanoseconds": self.nanoseconds,
-            "receivedAt": self.received_at,
             "price": self.price,
             "volume": self.volume,
             "notional": self.notional,
