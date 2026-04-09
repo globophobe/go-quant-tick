@@ -1,3 +1,4 @@
+from copy import copy
 from collections.abc import Callable
 from typing import Optional, Tuple
 
@@ -50,7 +51,6 @@ class TradeCallback:
 
     def get_aggregated_trade(self, symbol: str) -> dict:
         trades = self.trades[symbol]
-        from copy import copy
 
         first_trade = trades[0]
         last_trade = copy(trades[-1])
