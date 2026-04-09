@@ -13,7 +13,7 @@ def create_pubsub(
     ctx: Any,
     topic: str,
     create_subscription: bool = False,
-    message_retention_duration: int = 0,
+    message_retention_duration: int = 60 * 60 * 24,
     retain_acked_messages: bool = False,
 ) -> None:
     """Create a Pub/Sub topic and optional same-name subscription."""
@@ -33,16 +33,15 @@ def create_pubsub(
         pass
 
     if create_subscription:
-        # Retain messages for 24 hours
-        message_retention_duration = Duration()
-        message_retention_duration.FromSeconds(60 * 60 * 24)
         request = {
             "name": subscription_path,
             "topic": topic_path,
             "enable_message_ordering": True,
         }
         if message_retention_duration:
-            request["message_retention_duration"] = message_retention_duration
+            retention = Duration()
+            retention.FromSeconds(message_retention_duration)
+            request["message_retention_duration"] = retention
         if retain_acked_messages:
             request["retain_acked_messages"] = True
         with subscriber:
