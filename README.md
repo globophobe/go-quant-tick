@@ -1,6 +1,6 @@
 # What?
 
-Asyncio Quant Tick aggregates high frequency tick data from WebSockets.
+Go Quant Tick aggregates high frequency tick data from WebSockets.
 
 # How?
 
@@ -8,7 +8,7 @@ Sequences of trades that have equal symbol, timestamp, and tick rule are aggrega
 
 As well, the number of messages can be reduced by 30-50%
 
-By filtering aggregated messages, for example only emitting a message when an aggregated trade is greater than or equal to a `significant_trade_filter`, the number of messages can be reduced more.
+By filtering aggregated messages, for example only emitting a message when an aggregated trade is greater than or equal to a `SIGNIFICANT_TRADE_FILTER`, the number of messages can be reduced more.
 
 Additionally, messages can optionally be published to GCP Pub/Sub.
 
@@ -18,7 +18,7 @@ The following are two sequential aggregated trades by timestamp, nanoseconds, an
 
 As it was aggregated from 4 raw trades, the second trade has ticks 4.
 
-```python
+```json
 [
     {
         "timestamp": 1620000915.31424,
@@ -39,11 +39,11 @@ As it was aggregated from 4 raw trades, the second trade has ticks 4.
 ]
 ```
 
-An example filtered message, emitted because the second aggregated trade exceeds `significant_trade_filter >= 1000`
+An example filtered message, emitted because `SIGNIFICANT_TRADE_FILTER` is `1000`.
 
 Information related to the first trade is aggregated with the second.
 
-```python
+```json
 [
     {
         "timestamp": 1620000915.885381,
@@ -52,8 +52,8 @@ Information related to the first trade is aggregated with the second.
         "notional": "0.16429813",
         "tickRule": 1,
         "ticks": 4,
-        "high": '57071.2',
-        "low": '57064.01',
+        "high": "57071.2",
+        "low": "57064.01",
         "totalBuyVolume": "9376.6869202914",
         "totalVolume": "9943.3348221518",
         "totalBuyNotional": "0.16429813",
@@ -64,22 +64,112 @@ Information related to the first trade is aggregated with the second.
 ]
 ```
 
-For settings, see the [examples](https://github.com/globophobe/asyncio-quant-tick/blob/main/examples/)
+If no significant trade occurs in a minute window, a context tick is emitted with `volume`, `notional`, `tickRule`, and `ticks` omitted.
+
+Settings
+--------
+
+Pub/Sub is the default publisher:
+
+```shell
+PROJECT_ID=gcp-project go run ./cmd/quanttick
+```
+
+For local JSON-lines output:
+
+```shell
+go run ./cmd/quanttick -publisher=stdout
+```
+
+Common environment variables:
+
+```shell
+BINANCE_SYMBOLS=BTCUSDT=10000
+BINANCE_FUTURES_SYMBOLS=BTCUSDT
+BITFINEX_SYMBOLS=tBTCF0:USTF0
+BITMEX_SYMBOLS=XBTUSD
+COINBASE_SYMBOLS=BTC-USD
+COINBASE_ADVANCED_SYMBOLS=BTC-PERP-INTX
+HYPERLIQUID_SYMBOLS=BTC
+PUBLISH_STREAMS=significant-trades
+SIGNIFICANT_TRADE_FILTER=1000
+SHUTDOWN_FLUSH_TIMEOUT=10s
+```
+
+Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
+
+`PUBLISH_STREAMS` accepts:
+
+```text
+raw-trades,aggregated-trades,significant-trades
+```
+
+Pub/Sub topics default to the stream names and can be overridden:
+
+```shell
+RAW_TRADES_TOPIC=raw-trades
+AGGREGATED_TRADES_TOPIC=aggregated-trades
+SIGNIFICANT_TRADES_TOPIC=significant-trades
+```
+
+Example scripts
+---------------
+
+Each example prints significant-trade JSON lines until interrupted:
+
+```shell
+go run ./examples/binance
+go run ./examples/binance-futures
+go run ./examples/coinbase
+go run ./examples/coinbase-advanced
+go run ./examples/bitfinex
+go run ./examples/bitmex
+go run ./examples/hyperliquid
+```
+
+Example with a `BTCUSDT` threshold of `10000`:
+
+```shell
+BINANCE_SYMBOLS=BTCUSDT=10000 go run ./examples/binance
+```
 
 Supported exchanges
 -------------------
 
-:white_check_mark: Hyperliquid
+✅ Binance
+✅ Bitfinex
+✅ BitMEX
+✅ Coinbase
+✅ Coinbase Advanced
+✅ Hyperliquid
 
-:white_check_mark: Binance
+Docker
+------
 
-:white_check_mark: Bitfinex
+```shell
+docker build -t go-quant-tick .
+docker run --rm go-quant-tick -publisher=stdout
+```
 
-:white_check_mark: BitMEX
+Tests
+-----
 
-:white_check_mark: Coinbase Pro
+Run tests with:
 
-Contributing
-------------
+```shell
+go test ./...
+go test -race ./...
+```
 
-Install dependencies with `uv sync`. The docker example is built with [invoke tasks](https://github.com/globophobe/asyncio-quant-tick/blob/master/tasks.py). For example, `invoke build-container`
+Deploy
+------
+
+Deploy with Makefile:
+
+```shell
+make build-container
+make push-container
+make deploy-container
+make update-container
+make create-pubsub
+```

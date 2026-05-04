@@ -1,19 +1,18 @@
-FROM python:3.12-slim-bookworm
+FROM golang:1.26-bookworm AS build
 
-ARG WHEEL
-ARG PROJECT_ID
-ARG SENTRY_DSN
+WORKDIR /src
 
-ENV PROJECT_ID=$PROJECT_ID
-ENV SENTRY_DSN=$SENTRY_DSN
+COPY go.mod go.sum ./
+RUN go mod download
 
-COPY requirements.txt /tmp/requirements.txt
-COPY dist/${WHEEL} /tmp/${WHEEL}
-COPY main.py /
+COPY cmd ./cmd
+COPY quanttick ./quanttick
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && pip install --no-cache-dir /tmp/${WHEEL} \
-    && rm /tmp/requirements.txt /tmp/${WHEEL}
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/quanttick ./cmd/quanttick
 
-ENTRYPOINT ["/main.py"]
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/quanttick /quanttick
+
+USER nonroot:nonroot
+ENTRYPOINT ["/quanttick"]
