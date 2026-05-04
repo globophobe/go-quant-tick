@@ -137,10 +137,15 @@ Supported exchanges
 -------------------
 
 ✅ Binance
+
 ✅ Bitfinex
+
 ✅ BitMEX
+
 ✅ Coinbase
+
 ✅ Coinbase Advanced
+
 ✅ Hyperliquid
 
 Docker
