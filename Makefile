@@ -65,10 +65,15 @@ deploy-container:
 	if [ -z "$$service_account" ]; then service_account="$$SERVICE_ACCOUNT"; fi; \
 	container_env="$(CONTAINER_ENV)"; \
 	if [ -z "$$container_env" ]; then container_env="$$CONTAINER_ENV"; fi; \
+	sentry_dsn="$(SENTRY_DSN)"; \
+	if [ -z "$$sentry_dsn" ]; then sentry_dsn="$$SENTRY_DSN"; fi; \
 	test -n "$$project_id" || { echo "PROJECT_ID is required"; exit 1; }; \
 	test -n "$$service_account" || { echo "SERVICE_ACCOUNT is required"; exit 1; }; \
 	container_image="$(HOSTNAME)/$$project_id/$(IMAGE):$(TAG)"; \
-	if [ -z "$$container_env" ]; then container_env="PROJECT_ID=$$project_id"; fi; \
+	if [ -z "$$container_env" ]; then \
+		container_env="PROJECT_ID=$$project_id"; \
+		if [ -n "$$sentry_dsn" ]; then container_env="$$container_env,SENTRY_DSN=$$sentry_dsn"; fi; \
+	fi; \
 	gcloud compute instances create-with-container "$(INSTANCE)" \
 		--machine-type "$(MACHINE_TYPE)" \
 		--zone "$(ZONE)" \
