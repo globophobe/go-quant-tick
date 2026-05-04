@@ -97,7 +97,7 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 	{
 		envName:     "BITFINEX_SYMBOLS",
 		exchange:    exchanges.BitfinexName,
-		defaults:    []string{"tBTCUSD"},
+		defaults:    []string{"tBTCF0:USTF0"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitfinex(symbols) },
 	},
 	{

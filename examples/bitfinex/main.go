@@ -6,6 +6,6 @@ import (
 )
 
 func main() {
-	symbols := example.SymbolsEnv("BITFINEX_SYMBOLS", exchanges.BitfinexName, []string{"tBTCUSD"})
+	symbols := example.SymbolsEnv("BITFINEX_SYMBOLS", exchanges.BitfinexName, []string{"tBTCF0:USTF0"})
 	example.Run(exchanges.NewBitfinex(symbols.Symbols), symbols.Thresholds)
 }

@@ -50,18 +50,14 @@ func parseSymbolThreshold(value string) (string, Decimal, bool, error) {
 	if index < 0 {
 		return strings.TrimSpace(value), Decimal{}, false, nil
 	}
-
-	symbol := strings.TrimSpace(value[:index])
 	thresholdValue := strings.TrimSpace(value[index+1:])
 	if thresholdValue == "" {
 		return "", Decimal{}, false, fmt.Errorf("threshold is required in %q", value)
 	}
-
-	threshold, err := ParseDecimal(thresholdValue)
-	if err != nil {
-		return strings.TrimSpace(value), Decimal{}, false, nil
+	if _, err := ParseDecimal(thresholdValue); err == nil {
+		return "", Decimal{}, false, fmt.Errorf("threshold override in %q must use SYMBOL=THRESHOLD", value)
 	}
-	return symbol, threshold, true, nil
+	return strings.TrimSpace(value), Decimal{}, false, nil
 }
 
 func parseExplicitSymbolThreshold(value string, symbol string, thresholdValue string) (string, Decimal, bool, error) {

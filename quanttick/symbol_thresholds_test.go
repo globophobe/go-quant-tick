@@ -3,7 +3,7 @@ package quanttick
 import "testing"
 
 func TestParseSymbolThresholds(t *testing.T) {
-	config, err := ParseSymbolThresholds("binance", []string{"BTCUSDT:50000", "ETHUSDT=25000", " SOLUSDT "})
+	config, err := ParseSymbolThresholds("binance", []string{"BTCUSDT=50000", "ETHUSDT=25000", " SOLUSDT "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestParseSymbolThresholdsRejectsInvalidThreshold(t *testing.T) {
 }
 
 func TestParseSymbolThresholdsRejectsEmptyThreshold(t *testing.T) {
-	if _, err := ParseSymbolThresholds("binance", []string{"BTCUSDT:"}); err == nil {
+	if _, err := ParseSymbolThresholds("binance", []string{"BTCUSDT="}); err == nil {
 		t.Fatal("expected empty threshold error")
 	}
 }

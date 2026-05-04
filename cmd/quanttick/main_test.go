@@ -72,7 +72,7 @@ func TestNewPipelineFromEnvRejectsUnknownPublisher(t *testing.T) {
 }
 
 func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
-	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT:50000,ETHUSDT")
+	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
 	symbols, thresholds, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName, []string{"BTCUSDT"})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	} {
 		t.Setenv(name, "")
 	}
-	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT:50000,ETHUSDT")
+	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
@@ -137,7 +137,7 @@ func TestExchangesFromEnvAddsOptionalMarketClients(t *testing.T) {
 	} {
 		t.Setenv(name, "")
 	}
-	t.Setenv("COINBASE_ADVANCED_SYMBOLS", "BTC-PERP-INTX:50000")
+	t.Setenv("COINBASE_ADVANCED_SYMBOLS", "BTC-PERP-INTX=50000")
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
@@ -170,14 +170,6 @@ func TestExchangesFromEnvAddsOptionalMarketClients(t *testing.T) {
 	}
 	if !threshold.Equal(quanttick.MustDecimal("25000")) {
 		t.Fatalf("threshold = %s, want 25000", threshold)
-	}
-}
-
-func TestExchangeSymbolsEnvRejectsInvalidThreshold(t *testing.T) {
-	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=bad")
-
-	if _, _, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName, []string{"BTCUSDT"}); err == nil {
-		t.Fatal("expected invalid threshold error")
 	}
 }
 
