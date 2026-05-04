@@ -72,7 +72,7 @@ Settings
 Pub/Sub is the default publisher:
 
 ```shell
-PROJECT_ID=your-gcp-project go run ./cmd/quanttick
+PROJECT_ID=gcp-project go run ./cmd/quanttick
 ```
 
 For local JSON-lines output:
@@ -84,17 +84,19 @@ go run ./cmd/quanttick -publisher=stdout
 Common environment variables:
 
 ```shell
-BINANCE_SYMBOLS=BTCUSDT:50000,ETHUSDT
-COINBASE_SYMBOLS=BTC-USD:50000
-BITFINEX_SYMBOLS=tBTCUSD
+BINANCE_SYMBOLS=BTCUSDT=10000
+BINANCE_FUTURES_SYMBOLS=BTCUSDT
+BITFINEX_SYMBOLS=tBTCF0:USTF0
 BITMEX_SYMBOLS=XBTUSD
+COINBASE_SYMBOLS=BTC-USD
+COINBASE_ADVANCED_SYMBOLS=BTC-PERP-INTX
 HYPERLIQUID_SYMBOLS=BTC
 PUBLISH_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 SHUTDOWN_FLUSH_TIMEOUT=10s
 ```
 
-Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL:THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
+Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
 
 `PUBLISH_STREAMS` accepts:
 
@@ -117,26 +119,29 @@ Each example prints significant-trade JSON lines until interrupted:
 
 ```shell
 go run ./examples/binance
-go run ./examples/hyperliquid
+go run ./examples/binance-futures
 go run ./examples/coinbase
+go run ./examples/coinbase-advanced
 go run ./examples/bitfinex
 go run ./examples/bitmex
+go run ./examples/hyperliquid
 ```
 
 Example with a `BTCUSDT` threshold of `10000`:
 
 ```shell
-BINANCE_SYMBOLS=BTCUSDT:10000 go run ./examples/binance
+BINANCE_SYMBOLS=BTCUSDT=10000 go run ./examples/binance
 ```
 
 Supported exchanges
 -------------------
 
-✅ Hyperliquid
 ✅ Binance
 ✅ Bitfinex
 ✅ BitMEX
 ✅ Coinbase
+✅ Coinbase Advanced
+✅ Hyperliquid
 
 Docker
 ------
