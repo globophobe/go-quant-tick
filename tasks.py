@@ -1,4 +1,5 @@
 import os
+from shlex import quote
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +7,20 @@ from dotenv import load_dotenv
 from invoke import task
 
 load_dotenv()
+
+
+def gcloud_pubsub_exists(
+    ctx: Any,
+    resource: str,
+    name: str,
+    project_id: str,
+) -> bool:
+    """Return whether a Pub/Sub topic or subscription already exists."""
+    cmd = (
+        f"gcloud pubsub {resource} describe {quote(name)} "
+        f"--project {quote(project_id)}"
+    )
+    return ctx.run(cmd, warn=True, hide=True).ok
 
 
 @task
@@ -17,38 +32,27 @@ def create_pubsub(
     retain_acked_messages: bool = False,
 ) -> None:
     """Create a Pub/Sub topic and optional same-name subscription."""
-    from google.api_core.exceptions import AlreadyExists
-    from google.cloud import pubsub_v1
-    from google.protobuf.duration_pb2 import Duration
-
     project_id = os.environ["PROJECT_ID"]
-    publisher = pubsub_v1.PublisherClient()
-    subscriber = pubsub_v1.SubscriberClient()
-    topic_path = publisher.topic_path(project_id, topic)
-    subscription_path = subscriber.subscription_path(project_id, topic)
-
-    try:
-        publisher.create_topic(request={"name": topic_path})
-    except AlreadyExists:
-        pass
+    if not gcloud_pubsub_exists(ctx, "topics", topic, project_id):
+        ctx.run(
+            f"gcloud pubsub topics create {quote(topic)} "
+            f"--project {quote(project_id)}"
+        )
 
     if create_subscription:
-        request = {
-            "name": subscription_path,
-            "topic": topic_path,
-            "enable_message_ordering": True,
-        }
+        if gcloud_pubsub_exists(ctx, "subscriptions", topic, project_id):
+            return
+        cmd = (
+            f"gcloud pubsub subscriptions create {quote(topic)} "
+            f"--topic {quote(topic)} "
+            f"--project {quote(project_id)} "
+            "--enable-message-ordering"
+        )
         if message_retention_duration:
-            retention = Duration()
-            retention.FromSeconds(message_retention_duration)
-            request["message_retention_duration"] = retention
+            cmd += f" --message-retention-duration {message_retention_duration}s"
         if retain_acked_messages:
-            request["retain_acked_messages"] = True
-        with subscriber:
-            try:
-                subscriber.create_subscription(request=request)
-            except AlreadyExists:
-                pass
+            cmd += " --retain-acked-messages"
+        ctx.run(cmd)
 
 
 def get_docker_secrets() -> str:
