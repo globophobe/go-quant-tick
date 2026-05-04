@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 	"github.com/globophobe/go-quant-tick/quanttick/exchanges"
 )
@@ -21,17 +23,31 @@ func main() {
 	publisher := flag.String("publisher", "pubsub", "publisher: pubsub or stdout")
 	flag.Parse()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	clients, thresholds, err := exchangesFromEnv()
+	reporter, err := newErrorReporterFromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	pipeline, cleanup, err := newPipelineFromEnv(ctx, os.Stdout, thresholds, *publisher)
-	if err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, os.Stdout, *publisher, reporter); err != nil {
+		reporter.Capture(err)
+		reporter.Flush(sentryFlushTimeout)
 		log.Fatal(err)
+	}
+	reporter.Flush(sentryFlushTimeout)
+}
+
+func run(ctx context.Context, output io.Writer, publisher string, reporter errorReporter) error {
+	clients, thresholds, err := exchangesFromEnv()
+	if err != nil {
+		return err
+	}
+
+	pipeline, cleanup, err := newPipelineFromEnv(ctx, output, thresholds, publisher)
+	if err != nil {
+		return err
 	}
 	alignedFlushCtx, stopAlignedFlush := context.WithCancel(ctx)
 	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
@@ -39,28 +55,74 @@ func main() {
 		Timeout:  shutdownFlushTimeout(),
 		ErrorHandler: func(err error) {
 			log.Printf("pipeline timer flush error: %v", err)
+			reporter.Capture(err)
 		},
 	})
 
 	runErr := quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
 		log.Printf("exchange error: %v", err)
+		reporter.Capture(err)
 	})
 	stopAlignedFlush()
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
 		if runErr == nil {
 			runErr = flushErr
+		} else {
+			reporter.Capture(flushErr)
 		}
 	}
 	if cleanupErr := cleanup(); cleanupErr != nil {
 		log.Printf("publisher cleanup error: %v", cleanupErr)
 		if runErr == nil {
 			runErr = cleanupErr
+		} else {
+			reporter.Capture(cleanupErr)
 		}
 	}
 	if runErr != nil {
-		log.Fatal(runErr)
+		return runErr
 	}
+	return nil
+}
+
+const sentryFlushTimeout = 2 * time.Second
+
+type errorReporter interface {
+	Capture(error)
+	Flush(time.Duration)
+}
+
+type noopErrorReporter struct{}
+
+func (noopErrorReporter) Capture(error) {}
+
+func (noopErrorReporter) Flush(time.Duration) {}
+
+type sentryErrorReporter struct{}
+
+func (sentryErrorReporter) Capture(err error) {
+	if err != nil {
+		sentry.CaptureException(err)
+	}
+}
+
+func (sentryErrorReporter) Flush(timeout time.Duration) {
+	sentry.Flush(timeout)
+}
+
+func newErrorReporterFromEnv() (errorReporter, error) {
+	dsn := strings.TrimSpace(os.Getenv("SENTRY_DSN"))
+	if dsn == "" {
+		return noopErrorReporter{}, nil
+	}
+	if err := sentry.Init(sentry.ClientOptions{
+		Dsn:              dsn,
+		AttachStacktrace: true,
+	}); err != nil {
+		return nil, fmt.Errorf("init sentry: %w", err)
+	}
+	return sentryErrorReporter{}, nil
 }
 
 type exchangeEnvConfig struct {
