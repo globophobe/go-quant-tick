@@ -22,13 +22,9 @@ func ParseSymbolThresholds(exchange string, values []string) (SymbolThresholds, 
 			continue
 		}
 
-		symbol := value
-		thresholdValue := ""
-		hasThreshold := false
-		if left, right, ok := strings.Cut(value, ":"); ok {
-			symbol = strings.TrimSpace(left)
-			thresholdValue = strings.TrimSpace(right)
-			hasThreshold = true
+		symbol, threshold, hasThreshold, err := parseSymbolThreshold(value)
+		if err != nil {
+			return SymbolThresholds{}, err
 		}
 		if symbol == "" {
 			return SymbolThresholds{}, fmt.Errorf("symbol is required in %q", value)
@@ -39,14 +35,47 @@ func ParseSymbolThresholds(exchange string, values []string) (SymbolThresholds, 
 			continue
 		}
 
-		threshold, err := ParseDecimal(thresholdValue)
-		if err != nil {
-			return SymbolThresholds{}, fmt.Errorf("parse threshold for %s: %w", symbol, err)
-		}
 		config.Thresholds[ExchangeSymbolKey(exchange, symbol)] = threshold
 	}
 
 	return config, nil
+}
+
+func parseSymbolThreshold(value string) (string, Decimal, bool, error) {
+	if symbol, thresholdValue, ok := strings.Cut(value, "="); ok {
+		return parseExplicitSymbolThreshold(value, symbol, thresholdValue)
+	}
+
+	index := strings.LastIndex(value, ":")
+	if index < 0 {
+		return strings.TrimSpace(value), Decimal{}, false, nil
+	}
+
+	symbol := strings.TrimSpace(value[:index])
+	thresholdValue := strings.TrimSpace(value[index+1:])
+	if thresholdValue == "" {
+		return "", Decimal{}, false, fmt.Errorf("threshold is required in %q", value)
+	}
+
+	threshold, err := ParseDecimal(thresholdValue)
+	if err != nil {
+		return strings.TrimSpace(value), Decimal{}, false, nil
+	}
+	return symbol, threshold, true, nil
+}
+
+func parseExplicitSymbolThreshold(value string, symbol string, thresholdValue string) (string, Decimal, bool, error) {
+	symbol = strings.TrimSpace(symbol)
+	thresholdValue = strings.TrimSpace(thresholdValue)
+	if thresholdValue == "" {
+		return "", Decimal{}, false, fmt.Errorf("threshold is required in %q", value)
+	}
+
+	threshold, err := ParseDecimal(thresholdValue)
+	if err != nil {
+		return "", Decimal{}, false, fmt.Errorf("parse threshold for %s: %w", symbol, err)
+	}
+	return symbol, threshold, true, nil
 }
 
 func ExchangeSymbolKey(exchange string, symbol string) string {

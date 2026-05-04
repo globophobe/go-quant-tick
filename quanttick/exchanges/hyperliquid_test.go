@@ -32,6 +32,28 @@ func TestHyperliquidSubscriptionMessages(t *testing.T) {
 	}
 }
 
+func TestHyperliquidSpotSymbolSubscriptionMessages(t *testing.T) {
+	exchange := NewHyperliquid([]string{"PURR/USDC"})
+
+	got := exchange.SubscriptionMessages()
+	want := []map[string]any{
+		{
+			"method": "subscribe",
+			"subscription": map[string]any{
+				"type": "trades",
+				"coin": "PURR/USDC",
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscription messages = %#v, want %#v", got, want)
+	}
+	if exchange.Name() != HyperliquidName {
+		t.Fatalf("name = %s, want %s", exchange.Name(), HyperliquidName)
+	}
+}
+
 func TestHyperliquidParseTradeMessages(t *testing.T) {
 	exchange := NewHyperliquid([]string{"BTC"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -89,6 +111,24 @@ func TestHyperliquidParseTradeMessages(t *testing.T) {
 			t.Fatalf("receivedAt[%d] = %s, want %s", i, trades[i].ReceivedAt, receivedAt)
 		}
 	}
+}
+
+func TestHyperliquidSpotSymbolParseTradeMessages(t *testing.T) {
+	exchange := NewHyperliquid([]string{"PURR/USDC"})
+	trades, err := exchange.ParseTradeMessage(
+		[]byte(`{
+			"channel": "trades",
+			"data": [
+				{"coin": "PURR/USDC", "side": "B", "px": "100", "sz": "2", "time": 1775606400000, "tid": 1}
+			]
+		}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStrings(t, tradeExchanges(trades), []string{HyperliquidName})
+	assertStrings(t, tradeSymbols(trades), []string{"PURR/USDC"})
 }
 
 func TestHyperliquidParseIgnoresNonTradeMessages(t *testing.T) {

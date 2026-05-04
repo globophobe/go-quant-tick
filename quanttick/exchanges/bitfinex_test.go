@@ -30,6 +30,26 @@ func TestBitfinexSubscriptionMessages(t *testing.T) {
 	}
 }
 
+func TestBitfinexDerivativeSymbolSubscriptionMessages(t *testing.T) {
+	exchange := NewBitfinex([]string{"BTCF0:USTF0"})
+
+	got := exchange.SubscriptionMessages()
+	want := []map[string]any{
+		{
+			"event":   "subscribe",
+			"channel": "trades",
+			"symbol":  "tBTCF0:USTF0",
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscription messages = %#v, want %#v", got, want)
+	}
+	if exchange.Name() != BitfinexName {
+		t.Fatalf("name = %s, want %s", exchange.Name(), BitfinexName)
+	}
+}
+
 func TestBitfinexParseTradeMessages(t *testing.T) {
 	exchange := NewBitfinex([]string{"tBTCUSD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -65,6 +85,26 @@ func TestBitfinexParseTradeMessages(t *testing.T) {
 		if !trades[i].ReceivedAt.Equal(receivedAt) {
 			t.Fatalf("receivedAt[%d] = %s, want %s", i, trades[i].ReceivedAt, receivedAt)
 		}
+	}
+}
+
+func TestBitfinexDerivativeSymbolParseTradeMessages(t *testing.T) {
+	exchange := NewBitfinex([]string{"tBTCF0:USTF0"})
+	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+	messages := []string{
+		`{"event":"subscribed","chanId":1,"symbol":"tBTCF0:USTF0"}`,
+		`[1,"te",[100,1775606400000,1,100]]`,
+	}
+
+	trades := parseBitfinexFixture(t, exchange, messages, receivedAt)
+	if len(trades) != 1 {
+		t.Fatalf("trades = %d, want 1", len(trades))
+	}
+	if trades[0].Exchange != BitfinexName {
+		t.Fatalf("exchange = %s, want %s", trades[0].Exchange, BitfinexName)
+	}
+	if trades[0].Symbol != "tBTCF0:USTF0" {
+		t.Fatalf("symbol = %s, want tBTCF0:USTF0", trades[0].Symbol)
 	}
 }
 

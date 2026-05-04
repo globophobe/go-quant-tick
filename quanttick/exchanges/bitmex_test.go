@@ -22,6 +22,25 @@ func TestBitmexSubscriptionMessages(t *testing.T) {
 	}
 }
 
+func TestBitmexSpotSymbolSubscriptionMessages(t *testing.T) {
+	exchange := NewBitmex([]string{"XBT_USDT"})
+
+	got := exchange.SubscriptionMessages()
+	want := []map[string]any{
+		{
+			"op":   "subscribe",
+			"args": []string{"trade:XBT_USDT"},
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscription messages = %#v, want %#v", got, want)
+	}
+	if exchange.Name() != BitmexName {
+		t.Fatalf("name = %s, want %s", exchange.Name(), BitmexName)
+	}
+}
+
 func TestBitmexParseTradeMessages(t *testing.T) {
 	exchange := NewBitmex([]string{"XBTUSD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -75,6 +94,32 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 			t.Fatalf("receivedAt[%d] = %s, want %s", i, trades[i].ReceivedAt, receivedAt)
 		}
 	}
+}
+
+func TestBitmexSpotSymbolParseTradeMessages(t *testing.T) {
+	exchange := NewBitmex([]string{"XBT_USDT"})
+	trades, err := exchange.ParseTradeMessage(
+		[]byte(`{
+			"table": "trade",
+			"action": "insert",
+			"data": [
+				{
+					"trdMatchID": "a",
+					"symbol": "XBT_USDT",
+					"timestamp": "2026-04-08T00:00:00.000Z",
+					"side": "Buy",
+					"price": "100.0",
+					"homeNotional": "1.5"
+				}
+			]
+		}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStrings(t, tradeExchanges(trades), []string{BitmexName})
+	assertStrings(t, tradeSymbols(trades), []string{"XBT_USDT"})
 }
 
 func TestBitmexParseIgnoresNonTradeMessages(t *testing.T) {

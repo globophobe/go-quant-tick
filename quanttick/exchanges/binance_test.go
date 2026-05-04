@@ -26,6 +26,29 @@ func TestBinanceSubscriptionMessages(t *testing.T) {
 	}
 }
 
+func TestBinanceFuturesSubscriptionMessages(t *testing.T) {
+	exchange := NewBinanceFutures([]string{"BTCUSDT", "ETHUSDT"})
+
+	got := exchange.SubscriptionMessages()
+	want := []map[string]any{
+		{
+			"method": "SUBSCRIBE",
+			"params": []string{"btcusdt@trade", "ethusdt@trade"},
+			"id":     1,
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("subscription messages = %#v, want %#v", got, want)
+	}
+	if exchange.Name() != BinanceFuturesName {
+		t.Fatalf("name = %s, want %s", exchange.Name(), BinanceFuturesName)
+	}
+	if exchange.URL != BinanceFuturesURL {
+		t.Fatalf("url = %s, want %s", exchange.URL, BinanceFuturesURL)
+	}
+}
+
 func TestBinanceParseTradeMessages(t *testing.T) {
 	exchange := NewBinance([]string{"BTCUSDT"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -72,6 +95,38 @@ func TestBinanceParseTradeMessages(t *testing.T) {
 	}
 }
 
+func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
+	exchange := NewBinanceFutures([]string{"BTCUSDT"})
+	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+	messages := []string{
+		`{"e":"trade","s":"BTCUSDT","t":200,"T":1775606400000,"p":"100","q":"1","m":false}`,
+		`{"e":"trade","s":"BTCUSDT","t":201,"T":1775606401000,"p":"101","q":"2","m":true}`,
+		`{"e":"trade","s":"BTCUSDT","t":203,"T":1775606402000,"p":"102","q":"3","m":false}`,
+	}
+
+	trades := make([]quanttick.TradeEvent, 0, len(messages))
+	for _, message := range messages {
+		trade, ok, err := exchange.ParseTradeMessage([]byte(message), receivedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("expected futures raw trade message to parse: %s", message)
+		}
+		trades = append(trades, trade)
+	}
+
+	assertStrings(t, tradeUIDs(trades), []string{"200", "201", "203"})
+	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
+	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertStrings(t, tradeExchanges(trades), []string{BinanceFuturesName, BinanceFuturesName, BinanceFuturesName})
+	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
+	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
+	assertDecimals(t, tradePrices(trades), []string{"100", "101", "102"})
+	assertDecimals(t, tradeNotionals(trades), []string{"1", "2", "3"})
+	assertDecimals(t, tradeVolumes(trades), []string{"100", "202", "306"})
+}
+
 func TestBinanceParseLiveTradeShape(t *testing.T) {
 	exchange := NewBinance([]string{"BTCUSDT"})
 	data := []byte(`{"e":"trade","E":1777807004059,"s":"BTCUSDT","t":6268487624,"p":"78530.40000000","q":"0.00039000","T":1777807004059,"m":true,"M":true}`)
@@ -107,6 +162,21 @@ func TestBinanceParseIgnoresNonTradeMessages(t *testing.T) {
 		if ok {
 			t.Fatalf("expected non-trade message to be ignored, got %#v", trade)
 		}
+	}
+}
+
+func TestBinanceFuturesIgnoresAggregateTradeMessages(t *testing.T) {
+	exchange := NewBinanceFutures([]string{"BTCUSDT"})
+
+	trade, ok, err := exchange.ParseTradeMessage(
+		[]byte(`{"e":"aggTrade","s":"BTCUSDT","a":100,"f":100,"l":101,"T":1775606400000,"p":"100","q":"1","m":false}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("expected aggregate trade message to be ignored, got %#v", trade)
 	}
 }
 

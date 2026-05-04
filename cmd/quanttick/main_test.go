@@ -97,7 +97,9 @@ func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	for _, name := range []string{
 		"BINANCE_SYMBOLS",
+		"BINANCE_FUTURES_SYMBOLS",
 		"COINBASE_SYMBOLS",
+		"COINBASE_ADVANCED_SYMBOLS",
 		"BITFINEX_SYMBOLS",
 		"BITMEX_SYMBOLS",
 		"HYPERLIQUID_SYMBOLS",
@@ -110,8 +112,8 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(clients) != len(exchangeEnvConfigs) {
-		t.Fatalf("clients = %d, want %d", len(clients), len(exchangeEnvConfigs))
+	if len(clients) != defaultExchangeConfigCount() {
+		t.Fatalf("clients = %d, want %d", len(clients), defaultExchangeConfigCount())
 	}
 
 	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BinanceName, "BTCUSDT")]
@@ -123,8 +125,56 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	}
 }
 
+func TestExchangesFromEnvAddsOptionalMarketClients(t *testing.T) {
+	for _, name := range []string{
+		"BINANCE_SYMBOLS",
+		"BINANCE_FUTURES_SYMBOLS",
+		"COINBASE_SYMBOLS",
+		"COINBASE_ADVANCED_SYMBOLS",
+		"BITFINEX_SYMBOLS",
+		"BITMEX_SYMBOLS",
+		"HYPERLIQUID_SYMBOLS",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("COINBASE_ADVANCED_SYMBOLS", "BTC-PERP-INTX:50000")
+	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
+	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
+
+	clients, thresholds, err := exchangesFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantClients := defaultExchangeConfigCount() + 1
+	if len(clients) != wantClients {
+		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
+	}
+
+	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.CoinbaseAdvancedName, "BTC-PERP-INTX")]
+	if !ok {
+		t.Fatal("expected BTC-PERP-INTX threshold")
+	}
+	if !threshold.Equal(quanttick.MustDecimal("50000")) {
+		t.Fatalf("threshold = %s, want 50000", threshold)
+	}
+	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.BitmexName, "XBT_USDT")]
+	if !ok {
+		t.Fatal("expected XBT_USDT threshold")
+	}
+	if !threshold.Equal(quanttick.MustDecimal("25000")) {
+		t.Fatalf("threshold = %s, want 25000", threshold)
+	}
+	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.HyperliquidName, "PURR/USDC")]
+	if !ok {
+		t.Fatal("expected PURR/USDC threshold")
+	}
+	if !threshold.Equal(quanttick.MustDecimal("25000")) {
+		t.Fatalf("threshold = %s, want 25000", threshold)
+	}
+}
+
 func TestExchangeSymbolsEnvRejectsInvalidThreshold(t *testing.T) {
-	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT:bad")
+	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=bad")
 
 	if _, _, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName, []string{"BTCUSDT"}); err == nil {
 		t.Fatal("expected invalid threshold error")
@@ -169,4 +219,14 @@ func TestShutdownFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
 	if got := shutdownFlushTimeout(); got != 10*time.Second {
 		t.Fatalf("timeout = %s, want 10s", got)
 	}
+}
+
+func defaultExchangeConfigCount() int {
+	var count int
+	for _, config := range exchangeEnvConfigs {
+		if len(config.defaults) != 0 {
+			count++
+		}
+	}
+	return count
 }

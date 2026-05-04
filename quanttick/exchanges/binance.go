@@ -15,15 +15,19 @@ import (
 )
 
 const (
-	BinanceName = "binance"
-	BinanceURL  = "wss://stream.binance.com:9443/ws"
+	BinanceName        = "binance"
+	BinanceFuturesName = "binance-futures"
+	BinanceURL         = "wss://stream.binance.com:9443/ws"
+	BinanceFuturesURL  = "wss://fstream.binance.com/ws"
 )
 
 var _ quanttick.Exchange = (*Binance)(nil)
 
 type Binance struct {
 	Symbols        []string
+	name           string
 	URL            string
+	stream         string
 	ReconnectDelay time.Duration
 
 	lastIDs map[string]int64
@@ -34,7 +38,24 @@ type BinanceOption func(*Binance)
 func NewBinance(symbols []string, options ...BinanceOption) *Binance {
 	exchange := &Binance{
 		Symbols:        append([]string(nil), symbols...),
+		name:           BinanceName,
 		URL:            BinanceURL,
+		stream:         "trade",
+		ReconnectDelay: time.Second,
+		lastIDs:        make(map[string]int64),
+	}
+	for _, option := range options {
+		option(exchange)
+	}
+	return exchange
+}
+
+func NewBinanceFutures(symbols []string, options ...BinanceOption) *Binance {
+	exchange := &Binance{
+		Symbols:        append([]string(nil), symbols...),
+		name:           BinanceFuturesName,
+		URL:            BinanceFuturesURL,
+		stream:         "trade",
 		ReconnectDelay: time.Second,
 		lastIDs:        make(map[string]int64),
 	}
@@ -57,7 +78,7 @@ func WithBinanceReconnectDelay(delay time.Duration) BinanceOption {
 }
 
 func (b *Binance) Name() string {
-	return BinanceName
+	return b.name
 }
 
 func (b *Binance) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-chan error) {
@@ -88,7 +109,7 @@ func (b *Binance) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-ch
 func (b *Binance) SubscriptionMessages() []map[string]any {
 	params := make([]string, 0, len(b.Symbols))
 	for _, symbol := range b.Symbols {
-		params = append(params, strings.ToLower(symbol)+"@trade")
+		params = append(params, strings.ToLower(symbol)+"@"+b.stream)
 	}
 
 	return []map[string]any{
@@ -105,7 +126,7 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 	if err != nil {
 		return quanttick.TradeEvent{}, false, err
 	}
-	if !ok || eventType != "trade" {
+	if !ok || eventType != b.stream {
 		return quanttick.TradeEvent{}, false, nil
 	}
 
@@ -123,23 +144,24 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 		return quanttick.TradeEvent{}, false, fmt.Errorf("parse binance quantity: %w", err)
 	}
 
+	tradeID := msg.TradeID
 	prevID, hadPrevID := b.lastIDs[msg.Symbol]
-	b.lastIDs[msg.Symbol] = msg.TradeID
+	b.lastIDs[msg.Symbol] = tradeID
 	tickRule := 1
 	if msg.BuyerIsMaker {
 		tickRule = -1
 	}
 
 	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
-		Exchange:     BinanceName,
-		UID:          strconv.FormatInt(msg.TradeID, 10),
+		Exchange:     b.name,
+		UID:          strconv.FormatInt(tradeID, 10),
 		Symbol:       msg.Symbol,
 		Timestamp:    time.UnixMilli(msg.TradeTime).UTC(),
 		ReceivedAt:   receivedAt,
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
-		IsSequential: !hadPrevID || msg.TradeID == prevID+1,
+		IsSequential: !hadPrevID || tradeID == prevID+1,
 	}), true, nil
 }
 

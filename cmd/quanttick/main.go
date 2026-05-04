@@ -78,10 +78,21 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinance(symbols) },
 	},
 	{
+		envName:     "BINANCE_FUTURES_SYMBOLS",
+		exchange:    exchanges.BinanceFuturesName,
+		defaults:    []string{"BTCUSDT"},
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
+	},
+	{
 		envName:     "COINBASE_SYMBOLS",
 		exchange:    exchanges.CoinbaseName,
 		defaults:    []string{"BTC-USD"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
+	},
+	{
+		envName:     "COINBASE_ADVANCED_SYMBOLS",
+		exchange:    exchanges.CoinbaseAdvancedName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbaseAdvanced(symbols) },
 	},
 	{
 		envName:     "BITFINEX_SYMBOLS",
@@ -110,6 +121,9 @@ func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, err
 		symbols, symbolThresholds, err := exchangeSymbolsEnv(config.envName, config.exchange, config.defaults)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(symbols) == 0 {
+			continue
 		}
 		clients = append(clients, config.newExchange(symbols))
 		mergeThresholds(thresholds, symbolThresholds)
