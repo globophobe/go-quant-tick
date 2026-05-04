@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go/pubsub v1.50.2
 	github.com/coder/websocket v1.8.14
+	github.com/getsentry/sentry-go v0.46.1
 	github.com/shopspring/decimal v1.4.0
 )
 
