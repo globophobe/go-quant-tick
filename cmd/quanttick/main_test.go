@@ -99,7 +99,6 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 		"BINANCE_SYMBOLS",
 		"BINANCE_FUTURES_SYMBOLS",
 		"COINBASE_SYMBOLS",
-		"COINBASE_ADVANCED_SYMBOLS",
 		"BITFINEX_SYMBOLS",
 		"BITMEX_SYMBOLS",
 		"HYPERLIQUID_SYMBOLS",
@@ -125,19 +124,17 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	}
 }
 
-func TestExchangesFromEnvAddsOptionalMarketClients(t *testing.T) {
+func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	for _, name := range []string{
 		"BINANCE_SYMBOLS",
 		"BINANCE_FUTURES_SYMBOLS",
 		"COINBASE_SYMBOLS",
-		"COINBASE_ADVANCED_SYMBOLS",
 		"BITFINEX_SYMBOLS",
 		"BITMEX_SYMBOLS",
 		"HYPERLIQUID_SYMBOLS",
 	} {
 		t.Setenv(name, "")
 	}
-	t.Setenv("COINBASE_ADVANCED_SYMBOLS", "BTC-PERP-INTX=50000")
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
@@ -145,19 +142,12 @@ func TestExchangesFromEnvAddsOptionalMarketClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := defaultExchangeConfigCount() + 1
+	wantClients := defaultExchangeConfigCount()
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
 
-	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.CoinbaseAdvancedName, "BTC-PERP-INTX")]
-	if !ok {
-		t.Fatal("expected BTC-PERP-INTX threshold")
-	}
-	if !threshold.Equal(quanttick.MustDecimal("50000")) {
-		t.Fatalf("threshold = %s, want 50000", threshold)
-	}
-	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.BitmexName, "XBT_USDT")]
+	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BitmexName, "XBT_USDT")]
 	if !ok {
 		t.Fatal("expected XBT_USDT threshold")
 	}

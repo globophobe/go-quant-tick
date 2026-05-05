@@ -152,11 +152,6 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
 	},
 	{
-		envName:     "COINBASE_ADVANCED_SYMBOLS",
-		exchange:    exchanges.CoinbaseAdvancedName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbaseAdvanced(symbols) },
-	},
-	{
 		envName:     "BITFINEX_SYMBOLS",
 		exchange:    exchanges.BitfinexName,
 		defaults:    []string{"tBTCF0:USTF0"},
