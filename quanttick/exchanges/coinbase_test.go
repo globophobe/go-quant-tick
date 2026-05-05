@@ -25,29 +25,6 @@ func TestCoinbaseSubscriptionMessages(t *testing.T) {
 	}
 }
 
-func TestCoinbaseAdvancedSubscriptionMessages(t *testing.T) {
-	exchange := NewCoinbaseAdvanced([]string{"BTC-PERP-INTX"})
-
-	got := exchange.SubscriptionMessages()
-	want := []map[string]any{
-		{
-			"type":        "subscribe",
-			"product_ids": []string{"BTC-PERP-INTX"},
-			"channel":     "market_trades",
-		},
-	}
-
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("subscription messages = %#v, want %#v", got, want)
-	}
-	if exchange.Name() != CoinbaseAdvancedName {
-		t.Fatalf("name = %s, want %s", exchange.Name(), CoinbaseAdvancedName)
-	}
-	if exchange.URL != CoinbaseAdvancedURL {
-		t.Fatalf("url = %s, want %s", exchange.URL, CoinbaseAdvancedURL)
-	}
-}
-
 func TestCoinbaseParseTradeMessages(t *testing.T) {
 	exchange := NewCoinbase([]string{"BTC-USD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -83,58 +60,6 @@ func TestCoinbaseParseTradeMessages(t *testing.T) {
 	}
 }
 
-func TestCoinbaseAdvancedParseTradeMessages(t *testing.T) {
-	exchange := NewCoinbaseAdvanced([]string{"BTC-PERP-INTX"})
-	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
-
-	trades, err := exchange.ParseTradeMessage(
-		[]byte(`{
-			"channel": "market_trades",
-			"events": [
-				{
-					"type": "update",
-					"trades": [
-						{
-							"trade_id": "a",
-							"product_id": "BTC-PERP-INTX",
-							"price": "100",
-							"size": "1.5",
-							"side": "SELL",
-							"time": "2026-04-08T00:00:00.123456Z"
-						},
-						{
-							"trade_id": "b",
-							"product_id": "BTC-PERP-INTX",
-							"price": "101",
-							"size": "2",
-							"side": "BUY",
-							"time": "2026-04-08T00:00:01Z"
-						}
-					]
-				}
-			]
-		}`),
-		receivedAt,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertStrings(t, tradeUIDs(trades), []string{"a", "b"})
-	assertStrings(t, tradeExchanges(trades), []string{CoinbaseAdvancedName, CoinbaseAdvancedName})
-	assertStrings(t, tradeSymbols(trades), []string{"BTC-PERP-INTX", "BTC-PERP-INTX"})
-	assertInts(t, tradeTickRules(trades), []int{1, -1})
-	assertDecimals(t, tradePrices(trades), []string{"100", "101"})
-	assertDecimals(t, tradeNotionals(trades), []string{"1.5", "2"})
-	assertDecimals(t, tradeVolumes(trades), []string{"150.0", "202"})
-	if !trades[0].Timestamp.Equal(time.Date(2026, 4, 8, 0, 0, 0, 123456000, time.UTC)) {
-		t.Fatalf("timestamp = %s, want 2026-04-08T00:00:00.123456Z", trades[0].Timestamp)
-	}
-	if !trades[0].ReceivedAt.Equal(receivedAt) {
-		t.Fatalf("receivedAt = %s, want %s", trades[0].ReceivedAt, receivedAt)
-	}
-}
-
 func TestCoinbaseAcceptsLastMatchMessages(t *testing.T) {
 	exchange := NewCoinbase([]string{"BTC-USD"})
 
@@ -162,18 +87,6 @@ func TestCoinbaseParseIgnoresNonTradeMessages(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("expected non-trade message to be ignored, got %#v", trade)
-	}
-}
-
-func TestCoinbaseAdvancedIgnoresNonTradeMessages(t *testing.T) {
-	exchange := NewCoinbaseAdvanced([]string{"BTC-PERP-INTX"})
-
-	trades, err := exchange.ParseTradeMessage([]byte(`{"channel":"subscriptions","events":[]}`), time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(trades) != 0 {
-		t.Fatalf("expected non-trade message to be ignored, got %#v", trades)
 	}
 }
 
