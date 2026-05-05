@@ -89,7 +89,6 @@ BINANCE_FUTURES_SYMBOLS=BTCUSDT
 BITFINEX_SYMBOLS=tBTCF0:USTF0
 BITMEX_SYMBOLS=XBTUSD
 COINBASE_SYMBOLS=BTC-USD
-COINBASE_ADVANCED_SYMBOLS=BTC-PERP-INTX
 HYPERLIQUID_SYMBOLS=BTC
 PUBLISH_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
@@ -121,7 +120,6 @@ Each example prints significant-trade JSON lines until interrupted:
 go run ./examples/binance
 go run ./examples/binance-futures
 go run ./examples/coinbase
-go run ./examples/coinbase-advanced
 go run ./examples/bitfinex
 go run ./examples/bitmex
 go run ./examples/hyperliquid
@@ -143,8 +141,6 @@ Supported exchanges
 ✅ BitMEX
 
 ✅ Coinbase
-
-✅ Coinbase Advanced
 
 ✅ Hyperliquid
 
