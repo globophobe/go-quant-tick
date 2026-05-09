@@ -187,6 +187,34 @@ func TestSignificantThresholdAllowsZero(t *testing.T) {
 	}
 }
 
+func TestRuntimeFlushTimeoutReadsDuration(t *testing.T) {
+	t.Setenv("FLUSH_TIMEOUT", "3s")
+
+	if got := runtimeFlushTimeout(); got != 3*time.Second {
+		t.Fatalf("timeout = %s, want 3s", got)
+	}
+}
+
+func TestPubSubPublisherConfigFromEnvReadsSettings(t *testing.T) {
+	t.Setenv("PUBLISH_TIMEOUT", "1500ms")
+
+	config, err := pubSubPublisherConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Timeout != 1500*time.Millisecond {
+		t.Fatalf("publish timeout = %s, want 1500ms", config.Timeout)
+	}
+}
+
+func TestPubSubPublisherConfigFromEnvRejectsInvalidDuration(t *testing.T) {
+	t.Setenv("PUBLISH_TIMEOUT", "bad")
+
+	if _, err := pubSubPublisherConfigFromEnv(); err == nil {
+		t.Fatal("expected invalid publish timeout error")
+	}
+}
+
 func TestShutdownFlushTimeoutReadsDuration(t *testing.T) {
 	t.Setenv("SHUTDOWN_FLUSH_TIMEOUT", "3s")
 
