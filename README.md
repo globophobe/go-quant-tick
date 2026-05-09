@@ -81,7 +81,7 @@ For local JSON-lines output:
 go run ./cmd/quanttick -publisher=stdout
 ```
 
-Common environment variables:
+Environment variables:
 
 ```shell
 BINANCE_SYMBOLS=BTCUSDT=10000
@@ -92,7 +92,6 @@ COINBASE_SYMBOLS=BTC-USD
 HYPERLIQUID_SYMBOLS=BTC
 PUBLISH_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
-SHUTDOWN_FLUSH_TIMEOUT=10s
 ```
 
 Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
@@ -169,7 +168,7 @@ Create the VM and deploy the binary:
 make deploy-binary
 ```
 
-Build, upload, and redeploy a new binary to the existing VM:
+Build, upload, and redeploy a new binary:
 
 ```shell
 make update-binary

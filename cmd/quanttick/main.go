@@ -52,7 +52,7 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	alignedFlushCtx, stopAlignedFlush := context.WithCancel(ctx)
 	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
 		Interval: time.Minute,
-		Timeout:  shutdownFlushTimeout(),
+		Timeout:  runtimeFlushTimeout(),
 		ErrorHandler: func(err error) {
 			log.Printf("pipeline timer flush error: %v", err)
 			reporter.Capture(err)
@@ -251,6 +251,11 @@ func configurePubSubPublishers(
 		return nil, fmt.Errorf("PROJECT_ID is required when -publisher=pubsub")
 	}
 
+	publisherConfig, err := pubSubPublisherConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	var cleanups []func() error
 	cleanupAll := func() error {
 		var cleanupErr error
@@ -271,6 +276,7 @@ func configurePubSubPublishers(
 			ctx,
 			projectID,
 			envDefault("RAW_TRADES_TOPIC", string(quanttick.RawTrades)),
+			publisherConfig,
 		)
 		if err != nil {
 			return fail(err)
@@ -283,6 +289,7 @@ func configurePubSubPublishers(
 			ctx,
 			projectID,
 			envDefault("AGGREGATED_TRADES_TOPIC", string(quanttick.AggregatedTrades)),
+			publisherConfig,
 		)
 		if err != nil {
 			return fail(err)
@@ -295,6 +302,7 @@ func configurePubSubPublishers(
 			ctx,
 			projectID,
 			envDefault("SIGNIFICANT_TRADES_TOPIC", string(quanttick.SignificantTrades)),
+			publisherConfig,
 		)
 		if err != nil {
 			return fail(err)
@@ -387,14 +395,38 @@ func flushPipeline(pipeline *quanttick.TradePipeline) error {
 	return pipeline.Flush(ctx)
 }
 
+func pubSubPublisherConfigFromEnv() (quanttick.PubSubPublisherConfig, error) {
+	timeout, err := durationEnv("PUBLISH_TIMEOUT", time.Second)
+	if err != nil {
+		return quanttick.PubSubPublisherConfig{}, err
+	}
+	return quanttick.PubSubPublisherConfig{Timeout: timeout}, nil
+}
+
+func runtimeFlushTimeout() time.Duration {
+	return durationEnvDefault("FLUSH_TIMEOUT", 5*time.Second)
+}
+
 func shutdownFlushTimeout() time.Duration {
-	value := os.Getenv("SHUTDOWN_FLUSH_TIMEOUT")
+	return durationEnvDefault("SHUTDOWN_FLUSH_TIMEOUT", 10*time.Second)
+}
+
+func durationEnvDefault(name string, defaultValue time.Duration) time.Duration {
+	duration, err := durationEnv(name, defaultValue)
+	if err != nil {
+		return defaultValue
+	}
+	return duration
+}
+
+func durationEnv(name string, defaultValue time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
 	if value == "" {
-		return 10 * time.Second
+		return defaultValue, nil
 	}
 	duration, err := time.ParseDuration(value)
 	if err != nil || duration <= 0 {
-		return 10 * time.Second
+		return 0, fmt.Errorf("parse %s: %s", name, value)
 	}
-	return duration
+	return duration, nil
 }

@@ -10,7 +10,7 @@ import (
 	gcppubsub "cloud.google.com/go/pubsub"
 )
 
-func TestPubSubPublisherPublishesPayloadWithOrderingKeyAndAttributes(t *testing.T) {
+func TestPubSubPublisherPublishesPayloadWithAttributes(t *testing.T) {
 	topic := &fakePubSubTopic{}
 	publisher := NewPubSubPublisher[TradeEvent](topic)
 	trade := testTrade("1", time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC))
@@ -22,8 +22,8 @@ func TestPubSubPublisherPublishesPayloadWithOrderingKeyAndAttributes(t *testing.
 	if topic.message == nil {
 		t.Fatal("expected pubsub message")
 	}
-	if topic.message.OrderingKey != "test:BTCUSD" {
-		t.Fatalf("ordering key = %s, want test:BTCUSD", topic.message.OrderingKey)
+	if topic.message.OrderingKey != "" {
+		t.Fatalf("ordering key = %s, want empty", topic.message.OrderingKey)
 	}
 	if topic.message.Attributes["exchange"] != "test" {
 		t.Fatalf("exchange attribute = %s, want test", topic.message.Attributes["exchange"])
@@ -52,9 +52,13 @@ func TestPubSubPublisherReturnsPublishResultError(t *testing.T) {
 	}
 }
 
-func TestGetOrderingKey(t *testing.T) {
-	if got := GetOrderingKey("binance", "BTCUSDT"); got != "binance:BTCUSDT" {
-		t.Fatalf("ordering key = %s, want binance:BTCUSDT", got)
+func TestPubSubPublisherUsesPublishTimeout(t *testing.T) {
+	topic := &fakePubSubTopic{result: fakePubSubResult{wait: time.Second}}
+	publisher := NewPubSubPublisher[TradeEvent](topic, PubSubPublisherConfig{Timeout: time.Nanosecond})
+
+	err := publisher.Publish(context.Background(), testTrade("1", time.Now().UTC()))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
 	}
 }
 
@@ -69,9 +73,17 @@ func (t *fakePubSubTopic) Publish(ctx context.Context, message *gcppubsub.Messag
 }
 
 type fakePubSubResult struct {
-	err error
+	err  error
+	wait time.Duration
 }
 
 func (r fakePubSubResult) Get(ctx context.Context) (string, error) {
+	if r.wait > 0 {
+		select {
+		case <-time.After(r.wait):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	return "message-id", r.err
 }
