@@ -142,6 +142,7 @@ func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) 
 	if err != nil {
 		return fmt.Errorf("dial coinbase websocket: %w", err)
 	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range c.SubscriptionMessages() {

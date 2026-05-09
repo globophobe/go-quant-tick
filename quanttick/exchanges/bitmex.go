@@ -147,6 +147,7 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) er
 	if err != nil {
 		return fmt.Errorf("dial bitmex websocket: %w", err)
 	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range b.SubscriptionMessages() {

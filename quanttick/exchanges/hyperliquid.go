@@ -147,6 +147,7 @@ func (h *Hyperliquid) run(ctx context.Context, trades chan<- quanttick.TradeEven
 	if err != nil {
 		return fmt.Errorf("dial hyperliquid websocket: %w", err)
 	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range h.SubscriptionMessages() {
