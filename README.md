@@ -144,14 +144,6 @@ Supported exchanges
 
 ✅ Hyperliquid
 
-Docker
-------
-
-```shell
-docker build -t go-quant-tick .
-docker run --rm go-quant-tick -publisher=stdout
-```
-
 Tests
 -----
 
@@ -165,12 +157,20 @@ go test -race ./...
 Deploy
 ------
 
-Deploy with Makefile:
+Create Pub/Sub topics and subscriptions:
 
 ```shell
-make build-container
-make push-container
-make deploy-container
-make update-container
 make create-pubsub
+```
+
+Create the VM and deploy the binary:
+
+```shell
+make deploy-binary
+```
+
+Build, upload, and redeploy a new binary to the existing VM:
+
+```shell
+make update-binary
 ```
