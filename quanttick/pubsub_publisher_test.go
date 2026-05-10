@@ -31,6 +31,9 @@ func TestPubSubPublisherPublishesPayloadWithAttributes(t *testing.T) {
 	if topic.message.Attributes["symbol"] != "BTCUSD" {
 		t.Fatalf("symbol attribute = %s, want BTCUSD", topic.message.Attributes["symbol"])
 	}
+	if _, ok := topic.message.Attributes["significant_trade_filter"]; ok {
+		t.Fatal("raw trade should not include significant_trade_filter attribute")
+	}
 
 	var payload TradeEvent
 	if err := json.Unmarshal(topic.message.Data, &payload); err != nil {
@@ -38,6 +41,33 @@ func TestPubSubPublisherPublishesPayloadWithAttributes(t *testing.T) {
 	}
 	if payload.UID != "1" {
 		t.Fatalf("payload uid = %s, want 1", payload.UID)
+	}
+}
+
+func TestPubSubPublisherPublishesSignificantTradeFilterAttribute(t *testing.T) {
+	topic := &fakePubSubTopic{}
+	publisher := NewPubSubPublisher[SignificantTrade](topic)
+	trade := SignificantTrade{
+		Exchange:               "coinbase",
+		Symbol:                 "BTC-USD",
+		SignificantTradeFilter: MustDecimal("1000"),
+	}
+
+	if err := publisher.Publish(context.Background(), trade); err != nil {
+		t.Fatal(err)
+	}
+
+	if topic.message.Attributes["exchange"] != "coinbase" {
+		t.Fatalf("exchange attribute = %s, want coinbase", topic.message.Attributes["exchange"])
+	}
+	if topic.message.Attributes["symbol"] != "BTC-USD" {
+		t.Fatalf("symbol attribute = %s, want BTC-USD", topic.message.Attributes["symbol"])
+	}
+	if topic.message.Attributes["significant_trade_filter"] != "1000" {
+		t.Fatalf(
+			"significant_trade_filter attribute = %s, want 1000",
+			topic.message.Attributes["significant_trade_filter"],
+		)
 	}
 }
 

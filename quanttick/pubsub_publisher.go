@@ -15,6 +15,10 @@ type ExchangeSymbolPayload interface {
 	ExchangeSymbol() (exchange string, symbol string)
 }
 
+type AttributePayload interface {
+	PubSubAttributes() map[string]string
+}
+
 type PubSubPublisherConfig struct {
 	Timeout time.Duration
 }
@@ -81,12 +85,18 @@ func (p *PubSubPublisher[T]) Publish(ctx context.Context, payload T) error {
 	}
 
 	exchange, symbol := payload.ExchangeSymbol()
+	attributes := map[string]string{
+		"exchange": exchange,
+		"symbol":   symbol,
+	}
+	if attributed, ok := any(payload).(AttributePayload); ok {
+		for key, value := range attributed.PubSubAttributes() {
+			attributes[key] = value
+		}
+	}
 	message := &gcppubsub.Message{
-		Data: data,
-		Attributes: map[string]string{
-			"exchange": exchange,
-			"symbol":   symbol,
-		},
+		Data:       data,
+		Attributes: attributes,
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()

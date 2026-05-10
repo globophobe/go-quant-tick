@@ -75,6 +75,7 @@ func TestSignificantTradeAggregatorEmitsContextTick(t *testing.T) {
 	if payload.IsSequential {
 		t.Fatal("is sequential = true, want false")
 	}
+	assertDecimal(t, payload.SignificantTradeFilter, "1000")
 }
 
 func TestSignificantTradeAggregatorKeepsExchangeWindowsSeparate(t *testing.T) {
@@ -129,4 +130,5 @@ func TestSignificantTradeAggregatorUsesSymbolThresholdOverride(t *testing.T) {
 		t.Fatalf("uid = %s, want 1", out[0].UID)
 	}
 	assertDecimal(t, derefDecimal(t, out[0].Volume), "100")
+	assertDecimal(t, out[0].SignificantTradeFilter, "50")
 }

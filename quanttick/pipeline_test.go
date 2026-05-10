@@ -56,6 +56,7 @@ func TestTradePipelinePublishesRawAggregatedAndSignificantTrades(t *testing.T) {
 	}
 	assertDecimal(t, derefDecimal(t, significantTrade.Volume), "302")
 	assertDecimal(t, significantTrade.TotalVolume, "302")
+	assertDecimal(t, significantTrade.SignificantTradeFilter, "300")
 }
 
 func TestTradePipelineUsesSymbolSignificantThresholdOverride(t *testing.T) {
@@ -83,6 +84,7 @@ func TestTradePipelineUsesSymbolSignificantThresholdOverride(t *testing.T) {
 		t.Fatalf("significant uid = %s, want 1", significant.payloads[0].UID)
 	}
 	assertDecimal(t, derefDecimal(t, significant.payloads[0].Volume), "100")
+	assertDecimal(t, significant.payloads[0].SignificantTradeFilter, "50")
 }
 
 func TestTradePipelineSkipsAggregationWhenOnlyRawPublisherIsConfigured(t *testing.T) {
