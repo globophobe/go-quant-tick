@@ -21,9 +21,6 @@ BUILD_DIR ?= bin
 ARTIFACT_NAME ?= quanttick-$(TARGET_OS)-$(TARGET_ARCH)
 ARTIFACT_SOURCE := $(BUILD_DIR)/$(ARTIFACT_NAME)
 TOPICS ?= raw-trades aggregated-trades significant-trades
-CREATE_SUBSCRIPTION ?= 1
-MESSAGE_RETENTION_DURATION ?=
-RETAIN_ACKED_MESSAGES ?= false
 SERVICE_ENV ?=
 SERVICE_ENV_VARS := PUBLISH_STREAMS SIGNIFICANT_TRADE_FILTER BINANCE_SYMBOLS BINANCE_FUTURES_SYMBOLS BITFINEX_SYMBOLS BITMEX_SYMBOLS COINBASE_SYMBOLS HYPERLIQUID_SYMBOLS RAW_TRADES_TOPIC AGGREGATED_TRADES_TOPIC SIGNIFICANT_TRADES_TOPIC PUBLISH_TIMEOUT FLUSH_TIMEOUT SHUTDOWN_FLUSH_TIMEOUT SENTRY_DSN
 
@@ -142,17 +139,5 @@ create-pubsub:
 	for topic in $(TOPICS); do \
 		if ! gcloud pubsub topics describe "$$topic" --project "$$project_id" >/dev/null 2>&1; then \
 			gcloud pubsub topics create "$$topic" --project "$$project_id"; \
-		fi; \
-		if [ "$(CREATE_SUBSCRIPTION)" = "1" ]; then \
-			if ! gcloud pubsub subscriptions describe "$$topic" --project "$$project_id" >/dev/null 2>&1; then \
-				cmd="gcloud pubsub subscriptions create $$topic --topic $$topic --project $$project_id"; \
-				if [ -n "$(MESSAGE_RETENTION_DURATION)" ]; then \
-					cmd="$$cmd --message-retention-duration $(MESSAGE_RETENTION_DURATION)"; \
-				fi; \
-				if [ "$(RETAIN_ACKED_MESSAGES)" = "true" ]; then \
-					cmd="$$cmd --retain-acked-messages"; \
-				fi; \
-				$$cmd; \
-			fi; \
 		fi; \
 	done
