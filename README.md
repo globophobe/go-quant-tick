@@ -10,8 +10,6 @@ As well, the number of messages can be reduced by 30-50%
 
 By filtering aggregated messages, for example only emitting a message when an aggregated trade is greater than or equal to a `SIGNIFICANT_TRADE_FILTER`, the number of messages can be reduced more.
 
-Additionally, messages can optionally be published to GCP Pub/Sub.
-
 Example
 -------
 The following are two sequential aggregated trades by timestamp, nanoseconds, and tick rule.
@@ -69,12 +67,6 @@ If no significant trade occurs in a minute window, a context tick is emitted wit
 Settings
 --------
 
-Pub/Sub is the default publisher:
-
-```shell
-PROJECT_ID=gcp-project go run ./cmd/quanttick
-```
-
 For local JSON-lines output:
 
 ```shell
@@ -100,14 +92,6 @@ Symbol lists are comma-separated. A symbol can include an optional significant t
 
 ```text
 raw-trades,aggregated-trades,significant-trades
-```
-
-Pub/Sub topics default to the stream names and can be overridden:
-
-```shell
-RAW_TRADES_TOPIC=raw-trades
-AGGREGATED_TRADES_TOPIC=aggregated-trades
-SIGNIFICANT_TRADES_TOPIC=significant-trades
 ```
 
 Example scripts
@@ -151,25 +135,4 @@ Run tests with:
 ```shell
 go test ./...
 go test -race ./...
-```
-
-Deploy
-------
-
-Create Pub/Sub topics and subscriptions:
-
-```shell
-make create-pubsub
-```
-
-Create the VM and deploy the binary:
-
-```shell
-make deploy-binary
-```
-
-Build, upload, and redeploy a new binary:
-
-```shell
-make update-binary
 ```
