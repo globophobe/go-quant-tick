@@ -163,6 +163,9 @@ func (h *Hyperliquid) run(ctx context.Context, trades chan<- quanttick.TradeEven
 	for {
 		messageType, data, err := conn.Read(ctx)
 		if err != nil {
+			if isNormalWebSocketClose(err) {
+				return nil
+			}
 			return fmt.Errorf("read hyperliquid websocket: %w", err)
 		}
 		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
