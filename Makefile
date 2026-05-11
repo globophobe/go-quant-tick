@@ -20,9 +20,8 @@ TARGET_CGO ?= 0
 BUILD_DIR ?= bin
 ARTIFACT_NAME ?= quanttick-$(TARGET_OS)-$(TARGET_ARCH)
 ARTIFACT_SOURCE := $(BUILD_DIR)/$(ARTIFACT_NAME)
-TOPICS ?= raw-trades aggregated-trades significant-trades
 SERVICE_ENV ?=
-SERVICE_ENV_VARS := PUBLISH_STREAMS SIGNIFICANT_TRADE_FILTER BINANCE_SYMBOLS BINANCE_FUTURES_SYMBOLS BITFINEX_SYMBOLS BITMEX_SYMBOLS COINBASE_SYMBOLS HYPERLIQUID_SYMBOLS RAW_TRADES_TOPIC AGGREGATED_TRADES_TOPIC SIGNIFICANT_TRADES_TOPIC PUBLISH_TIMEOUT FLUSH_TIMEOUT SHUTDOWN_FLUSH_TIMEOUT SENTRY_DSN
+SERVICE_ENV_VARS := WEBSOCKET_DATA_STREAMS SIGNIFICANT_TRADE_FILTER BINANCE_SYMBOLS BINANCE_FUTURES_SYMBOLS BITFINEX_SYMBOLS BITMEX_SYMBOLS COINBASE_SYMBOLS HYPERLIQUID_SYMBOLS PRODUCTION_DATABASE_HOST DATABASE_USER DATABASE_NAME FLUSH_TIMEOUT SHUTDOWN_FLUSH_TIMEOUT SENTRY_DSN
 
 STARTUP_SCRIPT := deploy/startup.sh
 
@@ -52,7 +51,6 @@ endef
 define write_service_env
 service_env_file=$$(mktemp); \
 { \
-	printf 'PROJECT_ID=%s\n' "$$project_id"; \
 	for name in $(SERVICE_ENV_VARS); do \
 		eval value=\$$$${name}; \
 		if [ -n "$$value" ]; then printf '%s=%s\n' "$$name" "$$value"; fi; \
@@ -67,7 +65,7 @@ service_env_file=$$(mktemp); \
 } > "$$service_env_file"
 endef
 
-.PHONY: test race build build-linux artifact-name upload-artifact deploy-binary update-binary create-pubsub
+.PHONY: test race build build-linux artifact-name upload-artifact deploy-binary update-binary
 
 test:
 	go test ./...
@@ -131,13 +129,3 @@ update-binary: upload-artifact
 	gcloud compute instances reset "$(INSTANCE)" \
 		--project "$$project_id" \
 		--zone "$(ZONE)"
-
-create-pubsub:
-	@$(load_env); \
-	$(require_project_id); \
-	set -e; \
-	for topic in $(TOPICS); do \
-		if ! gcloud pubsub topics describe "$$topic" --project "$$project_id" >/dev/null 2>&1; then \
-			gcloud pubsub topics create "$$topic" --project "$$project_id"; \
-		fi; \
-	done
