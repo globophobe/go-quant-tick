@@ -3,17 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 	"github.com/globophobe/go-quant-tick/quanttick/exchanges"
+	_ "modernc.org/sqlite"
 )
 
-func TestPublishStreamsDefaultsToSignificantTrades(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "")
+func TestWebSocketDataStreamsDefaultsToSignificantTrades(t *testing.T) {
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "")
 
-	streams, err := publishStreams()
+	streams, err := websocketDataStreams()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,17 +24,17 @@ func TestPublishStreamsDefaultsToSignificantTrades(t *testing.T) {
 	}
 }
 
-func TestPublishStreamsRejectsUnknownStream(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "raw-trades,unknown")
+func TestWebSocketDataStreamsRejectsUnknownStream(t *testing.T) {
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "raw-trades,unknown")
 
-	if _, err := publishStreams(); err == nil {
+	if _, err := websocketDataStreams(); err == nil {
 		t.Fatal("expected error for unknown stream")
 	}
 }
 
-func TestPublisherModeDefaultsToPubSub(t *testing.T) {
-	if got := publisherMode(""); got != "pubsub" {
-		t.Fatalf("publisher mode = %s, want pubsub", got)
+func TestPublisherModeDefaultsToDB(t *testing.T) {
+	if got := publisherMode(""); got != "db" {
+		t.Fatalf("publisher mode = %s, want db", got)
 	}
 }
 
@@ -43,10 +45,10 @@ func TestPublisherModeNormalizesValue(t *testing.T) {
 }
 
 func TestNewPipelineFromEnvUsesStdoutPublisher(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "raw-trades")
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "raw-trades")
 
 	var output bytes.Buffer
-	pipeline, cleanup, err := newPipelineFromEnv(context.Background(), &output, nil, "stdout")
+	pipeline, cleanup, _, err := newPipelineFromEnv(context.Background(), &output, nil, "stdout")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,16 +59,47 @@ func TestNewPipelineFromEnvUsesStdoutPublisher(t *testing.T) {
 	}
 }
 
-func TestNewPipelineFromEnvDefaultsToPubSub(t *testing.T) {
-	t.Setenv("PROJECT_ID", "")
+func TestNewPipelineFromEnvUsesDatabasePublisher(t *testing.T) {
+	oldOpenDatabase := openDatabaseFunc
+	t.Cleanup(func() { openDatabaseFunc = oldOpenDatabase })
+	openDatabaseFunc = func(context.Context) (*sql.DB, func() error, error) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			return nil, nil, err
+		}
+		return db, db.Close, nil
+	}
 
-	if _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, ""); err == nil {
-		t.Fatal("expected missing project id error")
+	pipeline, cleanup, flusher, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if pipeline.SignificantPublisher == nil {
+		t.Fatal("significant publisher should be configured")
+	}
+	if flusher == nil {
+		t.Fatal("database publisher should return a bucket flusher")
+	}
+}
+
+func TestNewPipelineFromEnvDefaultsToDatabase(t *testing.T) {
+	if _, _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, ""); err == nil {
+		t.Fatal("expected missing database config error")
+	}
+}
+
+func TestCloudSQLInstanceConnectionNameStripsSocketPrefix(t *testing.T) {
+	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:dqt")
+
+	if got := cloudSQLInstanceConnectionName(); got != "project:region:dqt" {
+		t.Fatalf("instance connection name = %s, want project:region:dqt", got)
 	}
 }
 
 func TestNewPipelineFromEnvRejectsUnknownPublisher(t *testing.T) {
-	if _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "unknown"); err == nil {
+	if _, _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "unknown"); err == nil {
 		t.Fatal("expected unknown publisher error")
 	}
 }
@@ -192,26 +225,6 @@ func TestRuntimeFlushTimeoutReadsDuration(t *testing.T) {
 
 	if got := runtimeFlushTimeout(); got != 3*time.Second {
 		t.Fatalf("timeout = %s, want 3s", got)
-	}
-}
-
-func TestPubSubPublisherConfigFromEnvReadsSettings(t *testing.T) {
-	t.Setenv("PUBLISH_TIMEOUT", "1500ms")
-
-	config, err := pubSubPublisherConfigFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Timeout != 1500*time.Millisecond {
-		t.Fatalf("publish timeout = %s, want 1500ms", config.Timeout)
-	}
-}
-
-func TestPubSubPublisherConfigFromEnvRejectsInvalidDuration(t *testing.T) {
-	t.Setenv("PUBLISH_TIMEOUT", "bad")
-
-	if _, err := pubSubPublisherConfigFromEnv(); err == nil {
-		t.Fatal("expected invalid publish timeout error")
 	}
 }
 

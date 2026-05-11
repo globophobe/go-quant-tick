@@ -33,10 +33,6 @@ func (t SignificantTrade) ExchangeSymbol() (string, string) {
 	return t.Exchange, t.Symbol
 }
 
-func (t SignificantTrade) PubSubAttributes() map[string]string {
-	return map[string]string{"significant_trade_filter": t.SignificantTradeFilter.String()}
-}
-
 type SignificantTradeAggregator struct {
 	threshold      Decimal
 	thresholds     map[string]Decimal
