@@ -82,17 +82,18 @@ BITFINEX_SYMBOLS=tBTCF0:USTF0
 BITMEX_SYMBOLS=XBTUSD
 COINBASE_SYMBOLS=BTC-USD
 HYPERLIQUID_SYMBOLS=BTC
-PUBLISH_STREAMS=significant-trades
+WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 ```
 
 Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
 
-`PUBLISH_STREAMS` accepts:
+`WEBSOCKET_DATA_STREAMS` accepts:
 
 ```text
 raw-trades,aggregated-trades,significant-trades
 ```
+
 
 Example scripts
 ---------------
