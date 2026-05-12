@@ -80,7 +80,7 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	})
 
 	var runErr error
-	if hasTradeStreams(streams) {
+	if hasTradeStreams(streams) && len(clients) > 0 {
 		runErr = quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
 			log.Printf("exchange error: %v", err)
 			reporter.Capture(err)
@@ -170,7 +170,6 @@ func newErrorReporterFromEnv() (errorReporter, error) {
 type exchangeEnvConfig struct {
 	envName     string
 	exchange    string
-	defaults    []string
 	newExchange func([]string) quanttick.Exchange
 }
 
@@ -178,37 +177,31 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 	{
 		envName:     "BINANCE_SYMBOLS",
 		exchange:    exchanges.BinanceName,
-		defaults:    []string{"BTCUSDT"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinance(symbols) },
 	},
 	{
 		envName:     "BINANCE_FUTURES_SYMBOLS",
 		exchange:    exchanges.BinanceFuturesName,
-		defaults:    []string{"BTCUSDT"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
 	},
 	{
 		envName:     "COINBASE_SYMBOLS",
 		exchange:    exchanges.CoinbaseName,
-		defaults:    []string{"BTC-USD"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
 	},
 	{
 		envName:     "BITFINEX_SYMBOLS",
 		exchange:    exchanges.BitfinexName,
-		defaults:    []string{"tBTCF0:USTF0"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitfinex(symbols) },
 	},
 	{
 		envName:     "BITMEX_SYMBOLS",
 		exchange:    exchanges.BitmexName,
-		defaults:    []string{"XBTUSD"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitmex(symbols) },
 	},
 	{
 		envName:     "HYPERLIQUID_SYMBOLS",
 		exchange:    exchanges.HyperliquidName,
-		defaults:    []string{"BTC"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewHyperliquid(symbols) },
 	},
 }
@@ -217,7 +210,7 @@ func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, err
 	clients := make([]quanttick.Exchange, 0, len(exchangeEnvConfigs))
 	thresholds := make(map[string]quanttick.Decimal)
 	for _, config := range exchangeEnvConfigs {
-		symbols, symbolThresholds, err := exchangeSymbolsEnv(config.envName, config.exchange, config.defaults)
+		symbols, symbolThresholds, err := exchangeSymbolsEnv(config.envName, config.exchange)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -396,7 +389,10 @@ func publisherMode(value string) string {
 }
 
 func websocketDataStreams() (map[quanttick.Stream]bool, error) {
-	values := csvEnv("WEBSOCKET_DATA_STREAMS", []string{string(quanttick.SignificantTrades)})
+	values := csvEnvDefault(
+		"WEBSOCKET_DATA_STREAMS",
+		[]string{string(quanttick.SignificantTrades)},
+	)
 	streams := make([]quanttick.Stream, 0, len(values))
 	selected := make(map[quanttick.Stream]bool, len(values))
 	for _, value := range values {
@@ -419,12 +415,23 @@ func significantThreshold() (quanttick.Decimal, error) {
 	return threshold, nil
 }
 
-func csvEnv(name string, defaults []string) []string {
+func csvEnv(name string) []string {
+	value := os.Getenv(name)
+	if value == "" {
+		return nil
+	}
+	return parseCSV(value)
+}
+
+func csvEnvDefault(name string, defaults []string) []string {
 	value := os.Getenv(name)
 	if value == "" {
 		return append([]string(nil), defaults...)
 	}
+	return parseCSV(value)
+}
 
+func parseCSV(value string) []string {
 	parts := strings.Split(value, ",")
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -439,9 +446,8 @@ func csvEnv(name string, defaults []string) []string {
 func exchangeSymbolsEnv(
 	name string,
 	exchange string,
-	defaults []string,
 ) ([]string, map[string]quanttick.Decimal, error) {
-	config, err := quanttick.ParseSymbolThresholds(exchange, csvEnv(name, defaults))
+	config, err := quanttick.ParseSymbolThresholds(exchange, csvEnv(name))
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse %s: %w", name, err)
 	}

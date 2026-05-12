@@ -12,6 +12,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const websocketDataRetention = time.Hour
+
 type WebSocketDataStore struct {
 	db *sql.DB
 }
@@ -282,8 +284,19 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 			return fmt.Errorf("upsert websocket data bucket %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
 		}
 	}
+	cutoff := time.Now().UTC().Add(-websocketDataRetention).Truncate(time.Minute)
+	if err := deleteOldWebSocketData(ctx, tx, cutoff); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit websocket data transaction: %w", err)
+	}
+	return nil
+}
+
+func deleteOldWebSocketData(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+	if _, err := tx.ExecContext(ctx, deleteOldWebSocketDataSQL, cutoff); err != nil {
+		return fmt.Errorf("delete old websocket data rows: %w", err)
 	}
 	return nil
 }
@@ -310,3 +323,7 @@ DO UPDATE SET
 	raw_trades = excluded.raw_trades,
 	aggregated_trades = excluded.aggregated_trades,
 	filtered_trades = excluded.filtered_trades`
+
+const deleteOldWebSocketDataSQL = `
+DELETE FROM quant_tick_websocket_data
+WHERE timestamp < $1`

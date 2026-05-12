@@ -16,7 +16,7 @@ func TestWebSocketDataBufferWritesClosedMinuteBucket(t *testing.T) {
 		NewWebSocketDataStore(db),
 		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
 	)
-	timestamp := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
 	raw := testTrade(
 		"raw-1",
 		timestamp.Add(10*time.Second),
@@ -70,7 +70,7 @@ func TestWebSocketDataBufferKeepsOpenMinuteInMemory(t *testing.T) {
 		NewWebSocketDataStore(db),
 		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
 	)
-	timestamp := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
 	raw := testTrade(
 		"raw-1",
 		timestamp.Add(10*time.Second),
@@ -124,7 +124,7 @@ func TestWebSocketDataBufferUsesSymbolThreshold(t *testing.T) {
 			},
 		},
 	)
-	timestamp := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
 	raw := testTrade(
 		"raw-1",
 		timestamp.Add(10*time.Second),
@@ -151,7 +151,7 @@ func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
 		NewWebSocketDataStore(db),
 		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
 	)
-	timestamp := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
 	filtered := testSignificantTrade("filtered-1", timestamp.Add(10*time.Second))
 
 	if err := buffer.SignificantPublisher().Publish(context.Background(), filtered); err != nil {
@@ -183,13 +183,52 @@ func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
 	}
 }
 
+func TestWebSocketDataStoreDeletesRowsOlderThanRetention(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	oldTimestamp := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Minute)
+	_, err := db.Exec(
+		`INSERT INTO quant_tick_websocket_data (
+			exchange, api_symbol, significant_trade_filter, timestamp,
+			raw_trades, aggregated_trades, filtered_trades
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"coinbase",
+		"BTC-USD",
+		int64(1000),
+		oldTimestamp,
+		"[]",
+		"[]",
+		"[]",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTimestamp := time.Now().UTC().Truncate(time.Minute)
+	err = store.UpsertBuckets(context.Background(), []WebSocketDataBucket{
+		{
+			Exchange:               "coinbase",
+			APISymbol:              "BTC-USD",
+			SignificantTradeFilter: 1000,
+			Timestamp:              newTimestamp,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if countWebSocketDataTestRows(t, db) != 1 {
+		t.Fatal("old websocket data row should be deleted")
+	}
+}
+
 func TestWebSocketDataBufferRejectsNonIntegerThreshold(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	buffer := NewWebSocketDataBuffer(
 		NewWebSocketDataStore(db),
 		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000.5")},
 	)
-	trade := testTrade("raw-1", time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC))
+	trade := testTrade("raw-1", time.Now().UTC().Truncate(time.Minute))
 
 	err := buffer.RawPublisher().Publish(context.Background(), trade)
 	if err == nil {

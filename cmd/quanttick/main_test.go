@@ -107,7 +107,7 @@ func TestNewPipelineFromEnvRejectsUnknownPublisher(t *testing.T) {
 func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
-	symbols, thresholds, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName, []string{"BTCUSDT"})
+	symbols, thresholds, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,24 +128,14 @@ func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 }
 
 func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
-	for _, name := range []string{
-		"BINANCE_SYMBOLS",
-		"BINANCE_FUTURES_SYMBOLS",
-		"COINBASE_SYMBOLS",
-		"BITFINEX_SYMBOLS",
-		"BITMEX_SYMBOLS",
-		"HYPERLIQUID_SYMBOLS",
-	} {
-		t.Setenv(name, "")
-	}
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(clients) != defaultExchangeConfigCount() {
-		t.Fatalf("clients = %d, want %d", len(clients), defaultExchangeConfigCount())
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
 	}
 
 	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BinanceName, "BTCUSDT")]
@@ -158,16 +148,6 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 }
 
 func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
-	for _, name := range []string{
-		"BINANCE_SYMBOLS",
-		"BINANCE_FUTURES_SYMBOLS",
-		"COINBASE_SYMBOLS",
-		"BITFINEX_SYMBOLS",
-		"BITMEX_SYMBOLS",
-		"HYPERLIQUID_SYMBOLS",
-	} {
-		t.Setenv(name, "")
-	}
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
@@ -175,7 +155,7 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := defaultExchangeConfigCount()
+	wantClients := 2
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
@@ -244,12 +224,17 @@ func TestShutdownFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
 	}
 }
 
-func defaultExchangeConfigCount() int {
-	var count int
-	for _, config := range exchangeEnvConfigs {
-		if len(config.defaults) != 0 {
-			count++
-		}
+func TestExchangesFromEnvWithBlankSymbolsDoesNothing(t *testing.T) {
+	t.Setenv("BINANCE_SYMBOLS", "")
+
+	clients, thresholds, err := exchangesFromEnv()
+	if err != nil {
+		t.Fatal(err)
 	}
-	return count
+	if len(clients) != 0 {
+		t.Fatalf("clients = %d, want 0", len(clients))
+	}
+	if len(thresholds) != 0 {
+		t.Fatalf("thresholds = %#v, want empty", thresholds)
+	}
 }
