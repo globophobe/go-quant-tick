@@ -2,6 +2,7 @@ package exchanges
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -29,6 +30,16 @@ func TestIsNormalWebSocketClose(t *testing.T) {
 		{
 			name: "going away",
 			err:  websocket.CloseError{Code: websocket.StatusGoingAway},
+			want: true,
+		},
+		{
+			name: "eof",
+			err:  io.EOF,
+			want: true,
+		},
+		{
+			name: "wrapped eof",
+			err:  fmt.Errorf("read websocket: failed to read frame header: %w", io.EOF),
 			want: true,
 		},
 		{
