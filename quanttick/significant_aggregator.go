@@ -6,26 +6,27 @@ import (
 )
 
 type SignificantTrade struct {
-	Exchange         string    `json:"exchange"`
-	UID              string    `json:"uid"`
-	Symbol           string    `json:"symbol"`
-	Timestamp        time.Time `json:"timestamp"`
-	Nanoseconds      int       `json:"nanoseconds"`
-	Price            Decimal   `json:"price"`
-	Volume           *Decimal  `json:"volume"`
-	Notional         *Decimal  `json:"notional"`
-	TickRule         *int      `json:"tickRule"`
-	Ticks            *int      `json:"ticks"`
-	IsSequential     bool      `json:"isSequential"`
-	High             Decimal   `json:"high"`
-	Low              Decimal   `json:"low"`
-	TotalBuyVolume   Decimal   `json:"totalBuyVolume"`
-	TotalVolume      Decimal   `json:"totalVolume"`
-	TotalBuyNotional Decimal   `json:"totalBuyNotional"`
-	TotalNotional    Decimal   `json:"totalNotional"`
-	TotalBuyTicks    int       `json:"totalBuyTicks"`
-	TotalTicks       int       `json:"totalTicks"`
-	IsLate           bool      `json:"isLate,omitempty"`
+	Exchange               string    `json:"exchange"`
+	UID                    string    `json:"uid"`
+	Symbol                 string    `json:"symbol"`
+	Timestamp              time.Time `json:"timestamp"`
+	Nanoseconds            int       `json:"nanoseconds"`
+	Price                  Decimal   `json:"price"`
+	Volume                 *Decimal  `json:"volume"`
+	Notional               *Decimal  `json:"notional"`
+	TickRule               *int      `json:"tickRule"`
+	Ticks                  *int      `json:"ticks"`
+	IsSequential           bool      `json:"isSequential"`
+	High                   Decimal   `json:"high"`
+	Low                    Decimal   `json:"low"`
+	TotalBuyVolume         Decimal   `json:"totalBuyVolume"`
+	TotalVolume            Decimal   `json:"totalVolume"`
+	TotalBuyNotional       Decimal   `json:"totalBuyNotional"`
+	TotalNotional          Decimal   `json:"totalNotional"`
+	TotalBuyTicks          int       `json:"totalBuyTicks"`
+	TotalTicks             int       `json:"totalTicks"`
+	SignificantTradeFilter Decimal   `json:"-"`
+	IsLate                 bool      `json:"isLate,omitempty"`
 }
 
 func (t SignificantTrade) ExchangeSymbol() (string, string) {
@@ -216,23 +217,25 @@ func (a *SignificantTradeAggregator) aggregate(trades []TradeEvent, isLate bool)
 	}
 
 	base := trades[len(trades)-1]
+	filter := a.thresholdFor(base)
 	result := SignificantTrade{
-		Exchange:         base.Exchange,
-		UID:              base.UID,
-		Symbol:           base.Symbol,
-		Timestamp:        base.Timestamp,
-		Nanoseconds:      base.Nanoseconds,
-		Price:            base.Price,
-		IsSequential:     allSequential,
-		High:             high,
-		Low:              low,
-		TotalBuyVolume:   totalBuyVolume,
-		TotalVolume:      totalVolume,
-		TotalBuyNotional: totalBuyNotional,
-		TotalNotional:    totalNotional,
-		TotalBuyTicks:    totalBuyTicks,
-		TotalTicks:       totalTicks,
-		IsLate:           isLate,
+		Exchange:               base.Exchange,
+		UID:                    base.UID,
+		Symbol:                 base.Symbol,
+		Timestamp:              base.Timestamp,
+		Nanoseconds:            base.Nanoseconds,
+		Price:                  base.Price,
+		IsSequential:           allSequential,
+		High:                   high,
+		Low:                    low,
+		TotalBuyVolume:         totalBuyVolume,
+		TotalVolume:            totalVolume,
+		TotalBuyNotional:       totalBuyNotional,
+		TotalNotional:          totalNotional,
+		TotalBuyTicks:          totalBuyTicks,
+		TotalTicks:             totalTicks,
+		SignificantTradeFilter: filter,
+		IsLate:                 isLate,
 	}
 
 	if significant != nil {

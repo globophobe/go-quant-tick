@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,14 +16,17 @@ import (
 	"syscall"
 	"time"
 
+	"cloud.google.com/go/cloudsqlconn"
 	"github.com/getsentry/sentry-go"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 	"github.com/globophobe/go-quant-tick/quanttick/exchanges"
 )
 
 func main() {
-	publisher := flag.String("publisher", "pubsub", "publisher: pubsub or stdout")
+	publisher := flag.String("publisher", "", "publisher: db or stdout")
 	flag.Parse()
 
 	reporter, err := newErrorReporterFromEnv()
@@ -45,7 +51,11 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		return err
 	}
 
-	pipeline, cleanup, err := newPipelineFromEnv(ctx, output, thresholds, publisher)
+	pipeline, cleanup, bucketFlusher, err := newPipelineFromEnv(ctx, output, thresholds, publisher)
+	if err != nil {
+		return err
+	}
+	streams, err := websocketDataStreams()
 	if err != nil {
 		return err
 	}
@@ -53,16 +63,34 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
 		Interval: time.Minute,
 		Timeout:  runtimeFlushTimeout(),
+		AfterFlush: func(ctx context.Context, now time.Time) error {
+			dueFlusher, ok := bucketFlusher.(interface {
+				FlushDue(context.Context, time.Time) (int, error)
+			})
+			if !ok {
+				return nil
+			}
+			_, err := dueFlusher.FlushDue(ctx, now)
+			return err
+		},
 		ErrorHandler: func(err error) {
 			log.Printf("pipeline timer flush error: %v", err)
 			reporter.Capture(err)
 		},
 	})
 
-	runErr := quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
-		log.Printf("exchange error: %v", err)
-		reporter.Capture(err)
-	})
+	var runErr error
+	if hasTradeStreams(streams) && len(clients) > 0 {
+		runErr = quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
+			log.Printf("exchange error: %v", err)
+			reporter.Capture(err)
+		})
+	} else {
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			runErr = ctx.Err()
+		}
+	}
 	stopAlignedFlush()
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
@@ -70,6 +98,16 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			runErr = flushErr
 		} else {
 			reporter.Capture(flushErr)
+		}
+	}
+	if bucketFlusher != nil {
+		if flushErr := flushBuckets(bucketFlusher); flushErr != nil {
+			log.Printf("bucket flush error: %v", flushErr)
+			if runErr == nil {
+				runErr = flushErr
+			} else {
+				reporter.Capture(flushErr)
+			}
 		}
 	}
 	if cleanupErr := cleanup(); cleanupErr != nil {
@@ -84,6 +122,10 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		return runErr
 	}
 	return nil
+}
+
+func hasTradeStreams(streams map[quanttick.Stream]bool) bool {
+	return streams[quanttick.RawTrades] || streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades]
 }
 
 const sentryFlushTimeout = 2 * time.Second
@@ -128,7 +170,6 @@ func newErrorReporterFromEnv() (errorReporter, error) {
 type exchangeEnvConfig struct {
 	envName     string
 	exchange    string
-	defaults    []string
 	newExchange func([]string) quanttick.Exchange
 }
 
@@ -136,37 +177,31 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 	{
 		envName:     "BINANCE_SYMBOLS",
 		exchange:    exchanges.BinanceName,
-		defaults:    []string{"BTCUSDT"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinance(symbols) },
 	},
 	{
 		envName:     "BINANCE_FUTURES_SYMBOLS",
 		exchange:    exchanges.BinanceFuturesName,
-		defaults:    []string{"BTCUSDT"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
 	},
 	{
 		envName:     "COINBASE_SYMBOLS",
 		exchange:    exchanges.CoinbaseName,
-		defaults:    []string{"BTC-USD"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
 	},
 	{
 		envName:     "BITFINEX_SYMBOLS",
 		exchange:    exchanges.BitfinexName,
-		defaults:    []string{"tBTCF0:USTF0"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitfinex(symbols) },
 	},
 	{
 		envName:     "BITMEX_SYMBOLS",
 		exchange:    exchanges.BitmexName,
-		defaults:    []string{"XBTUSD"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitmex(symbols) },
 	},
 	{
 		envName:     "HYPERLIQUID_SYMBOLS",
 		exchange:    exchanges.HyperliquidName,
-		defaults:    []string{"BTC"},
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewHyperliquid(symbols) },
 	},
 }
@@ -175,7 +210,7 @@ func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, err
 	clients := make([]quanttick.Exchange, 0, len(exchangeEnvConfigs))
 	thresholds := make(map[string]quanttick.Decimal)
 	for _, config := range exchangeEnvConfigs {
-		symbols, symbolThresholds, err := exchangeSymbolsEnv(config.envName, config.exchange, config.defaults)
+		symbols, symbolThresholds, err := exchangeSymbolsEnv(config.envName, config.exchange)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -193,15 +228,15 @@ func newPipelineFromEnv(
 	output io.Writer,
 	significantThresholds map[string]quanttick.Decimal,
 	publisher string,
-) (*quanttick.TradePipeline, func() error, error) {
-	streams, err := publishStreams()
+) (*quanttick.TradePipeline, func() error, bucketFlusher, error) {
+	streams, err := websocketDataStreams()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	threshold, err := significantThreshold()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	config := quanttick.TradePipelineConfig{
@@ -215,17 +250,26 @@ func newPipelineFromEnv(
 	switch mode {
 	case "stdout":
 		configureStdoutPublishers(&config, streams, output)
-	case "pubsub":
-		var err error
-		cleanup, err = configurePubSubPublishers(ctx, &config, streams)
+		return quanttick.NewTradePipeline(config), cleanup, nil, nil
+	case "db":
+		bucketBuffer, cleanup, err := configureDatabasePublishers(
+			ctx,
+			&config,
+			streams,
+			threshold,
+			significantThresholds,
+		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
+		return quanttick.NewTradePipeline(config), cleanup, bucketBuffer, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown publisher: %s", mode)
+		return nil, nil, nil, fmt.Errorf("unknown publisher: %s", mode)
 	}
+}
 
-	return quanttick.NewTradePipeline(config), cleanup, nil
+type bucketFlusher interface {
+	Flush(context.Context) (int, error)
 }
 
 func configureStdoutPublishers(config *quanttick.TradePipelineConfig, streams map[quanttick.Stream]bool, output io.Writer) {
@@ -241,89 +285,114 @@ func configureStdoutPublishers(config *quanttick.TradePipelineConfig, streams ma
 	}
 }
 
-func configurePubSubPublishers(
+func configureDatabasePublishers(
 	ctx context.Context,
 	config *quanttick.TradePipelineConfig,
 	streams map[quanttick.Stream]bool,
-) (func() error, error) {
-	projectID := os.Getenv("PROJECT_ID")
-	if projectID == "" {
-		return nil, fmt.Errorf("PROJECT_ID is required when -publisher=pubsub")
-	}
-
-	publisherConfig, err := pubSubPublisherConfigFromEnv()
+	defaultThreshold quanttick.Decimal,
+	significantThresholds map[string]quanttick.Decimal,
+) (bucketFlusher, func() error, error) {
+	db, cleanup, err := openDatabaseFunc(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	var cleanups []func() error
-	cleanupAll := func() error {
-		var cleanupErr error
-		for _, cleanup := range cleanups {
-			if err := cleanup(); err != nil && cleanupErr == nil {
-				cleanupErr = err
-			}
-		}
-		return cleanupErr
+	fail := func(err error) (bucketFlusher, func() error, error) {
+		_ = cleanup()
+		return nil, nil, err
 	}
-	fail := func(err error) (func() error, error) {
-		_ = cleanupAll()
-		return nil, err
-	}
-
+	store := quanttick.NewWebSocketDataStore(db)
+	buffer := quanttick.NewWebSocketDataBuffer(
+		store,
+		quanttick.WebSocketDataBufferConfig{
+			DefaultSignificantTradeFilter: defaultThreshold,
+			SignificantThresholds:         significantThresholds,
+		},
+	)
 	if streams[quanttick.RawTrades] {
-		publisher, cleanup, err := quanttick.NewCloudPubSubPublisher[quanttick.TradeEvent](
-			ctx,
-			projectID,
-			envDefault("RAW_TRADES_TOPIC", string(quanttick.RawTrades)),
-			publisherConfig,
-		)
-		if err != nil {
-			return fail(err)
-		}
-		config.RawPublisher = publisher
-		cleanups = append(cleanups, cleanup)
+		config.RawPublisher = buffer.RawPublisher()
 	}
 	if streams[quanttick.AggregatedTrades] {
-		publisher, cleanup, err := quanttick.NewCloudPubSubPublisher[quanttick.TradeEvent](
-			ctx,
-			projectID,
-			envDefault("AGGREGATED_TRADES_TOPIC", string(quanttick.AggregatedTrades)),
-			publisherConfig,
-		)
-		if err != nil {
-			return fail(err)
-		}
-		config.AggregatedPublisher = publisher
-		cleanups = append(cleanups, cleanup)
+		config.AggregatedPublisher = buffer.AggregatedPublisher()
 	}
 	if streams[quanttick.SignificantTrades] {
-		publisher, cleanup, err := quanttick.NewCloudPubSubPublisher[quanttick.SignificantTrade](
-			ctx,
-			projectID,
-			envDefault("SIGNIFICANT_TRADES_TOPIC", string(quanttick.SignificantTrades)),
-			publisherConfig,
-		)
-		if err != nil {
-			return fail(err)
-		}
-		config.SignificantPublisher = publisher
-		cleanups = append(cleanups, cleanup)
+		config.SignificantPublisher = buffer.SignificantPublisher()
+	}
+	if err := db.PingContext(ctx); err != nil {
+		return fail(fmt.Errorf("ping database: %w", err))
+	}
+	return buffer, cleanup, nil
+}
+
+var openDatabaseFunc = openDatabase
+
+func openDatabase(ctx context.Context) (*sql.DB, func() error, error) {
+	instanceConnectionName := cloudSQLInstanceConnectionName()
+	dbUser := strings.TrimSpace(os.Getenv("DATABASE_USER"))
+	dbName := os.Getenv("DATABASE_NAME")
+	if instanceConnectionName == "" {
+		return nil, nil, fmt.Errorf("PRODUCTION_DATABASE_HOST is required when -publisher=db")
+	}
+	if dbUser == "" {
+		return nil, nil, fmt.Errorf("DATABASE_USER is required when -publisher=db")
+	}
+	if dbName == "" {
+		return nil, nil, fmt.Errorf("DATABASE_NAME is required when -publisher=db")
 	}
 
-	return cleanupAll, nil
+	dialer, err := cloudsqlconn.NewDialer(
+		ctx,
+		cloudsqlconn.WithIAMAuthN(),
+		cloudsqlconn.WithLazyRefresh(),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create cloud sql dialer: %w", err)
+	}
+	pgxConfig, err := pgx.ParseConfig(fmt.Sprintf("user=%s dbname=%s sslmode=disable", dbUser, dbName))
+	if err != nil {
+		_ = dialer.Close()
+		return nil, nil, fmt.Errorf("parse pgx config: %w", err)
+	}
+	pgxConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	pgxConfig.DialFunc = func(ctx context.Context, network string, _addr string) (net.Conn, error) {
+		return dialer.Dial(ctx, instanceConnectionName)
+	}
+	dbURI := stdlib.RegisterConnConfig(pgxConfig)
+	db, err := sql.Open("pgx", dbURI)
+	if err != nil {
+		_ = dialer.Close()
+		return nil, nil, fmt.Errorf("open cloud sql database: %w", err)
+	}
+	cleanup := func() error {
+		return errors.Join(db.Close(), dialer.Close())
+	}
+	return db, cleanup, nil
+}
+
+func cloudSQLInstanceConnectionName() string {
+	value := os.Getenv("PRODUCTION_DATABASE_HOST")
+	return strings.TrimPrefix(strings.TrimSpace(value), "/cloudsql/")
+}
+
+func flushBuckets(flusher bucketFlusher) error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout())
+	defer cancel()
+	_, err := flusher.Flush(ctx)
+	return err
 }
 
 func publisherMode(value string) string {
 	mode := strings.ToLower(strings.TrimSpace(value))
-	if mode == "" {
-		return "pubsub"
+	if mode != "" {
+		return mode
 	}
-	return mode
+	return "db"
 }
 
-func publishStreams() (map[quanttick.Stream]bool, error) {
-	values := csvEnv("PUBLISH_STREAMS", []string{string(quanttick.SignificantTrades)})
+func websocketDataStreams() (map[quanttick.Stream]bool, error) {
+	values := csvEnvDefault(
+		"WEBSOCKET_DATA_STREAMS",
+		[]string{string(quanttick.SignificantTrades)},
+	)
 	streams := make([]quanttick.Stream, 0, len(values))
 	selected := make(map[quanttick.Stream]bool, len(values))
 	for _, value := range values {
@@ -346,12 +415,23 @@ func significantThreshold() (quanttick.Decimal, error) {
 	return threshold, nil
 }
 
-func csvEnv(name string, defaults []string) []string {
+func csvEnv(name string) []string {
+	value := os.Getenv(name)
+	if value == "" {
+		return nil
+	}
+	return parseCSV(value)
+}
+
+func csvEnvDefault(name string, defaults []string) []string {
 	value := os.Getenv(name)
 	if value == "" {
 		return append([]string(nil), defaults...)
 	}
+	return parseCSV(value)
+}
 
+func parseCSV(value string) []string {
 	parts := strings.Split(value, ",")
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -366,9 +446,8 @@ func csvEnv(name string, defaults []string) []string {
 func exchangeSymbolsEnv(
 	name string,
 	exchange string,
-	defaults []string,
 ) ([]string, map[string]quanttick.Decimal, error) {
-	config, err := quanttick.ParseSymbolThresholds(exchange, csvEnv(name, defaults))
+	config, err := quanttick.ParseSymbolThresholds(exchange, csvEnv(name))
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse %s: %w", name, err)
 	}
@@ -393,14 +472,6 @@ func flushPipeline(pipeline *quanttick.TradePipeline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout())
 	defer cancel()
 	return pipeline.Flush(ctx)
-}
-
-func pubSubPublisherConfigFromEnv() (quanttick.PubSubPublisherConfig, error) {
-	timeout, err := durationEnv("PUBLISH_TIMEOUT", time.Second)
-	if err != nil {
-		return quanttick.PubSubPublisherConfig{}, err
-	}
-	return quanttick.PubSubPublisherConfig{Timeout: timeout}, nil
 }
 
 func runtimeFlushTimeout() time.Duration {

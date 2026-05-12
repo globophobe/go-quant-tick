@@ -186,6 +186,7 @@ func (p *TradePipeline) flushSignificantTrades(ctx context.Context) error {
 type AlignedFlushConfig struct {
 	Interval     time.Duration
 	Timeout      time.Duration
+	AfterFlush   func(context.Context, time.Time) error
 	ErrorHandler ErrorHandler
 }
 
@@ -210,7 +211,11 @@ func StartAlignedFlush(ctx context.Context, pipeline *TradePipeline, config Alig
 			select {
 			case <-timer.C:
 				flushCtx, cancel := context.WithTimeout(context.Background(), timeout)
-				err := pipeline.FlushDue(flushCtx, time.Now())
+				now := time.Now()
+				err := pipeline.FlushDue(flushCtx, now)
+				if err == nil && config.AfterFlush != nil {
+					err = config.AfterFlush(flushCtx, now)
+				}
 				cancel()
 				if err != nil && config.ErrorHandler != nil {
 					config.ErrorHandler(err)
@@ -233,6 +238,15 @@ func nextAlignedTime(now time.Time, interval time.Duration) time.Time {
 }
 
 func (p *TradePipeline) publishSignificantTrades(ctx context.Context, trades []SignificantTrade) error {
+	if len(trades) == 0 {
+		return nil
+	}
+	if batchPublisher, ok := p.SignificantPublisher.(BatchPublisher[SignificantTrade]); ok {
+		if err := batchPublisher.PublishBatch(ctx, trades); err != nil {
+			return fmt.Errorf("publish significant trade bucket: %w", err)
+		}
+		return nil
+	}
 	for _, significantTrade := range trades {
 		if err := p.SignificantPublisher.Publish(ctx, significantTrade); err != nil {
 			return fmt.Errorf("publish significant trade: %w", err)
@@ -255,7 +269,7 @@ func pendingKeys(trades map[string][]TradeEvent) []string {
 func ValidateStreams(streams []Stream) error {
 	for _, stream := range streams {
 		if _, ok := validStreams[stream]; !ok {
-			return fmt.Errorf("unknown publish stream: %s", stream)
+			return fmt.Errorf("unknown websocket data stream: %s", stream)
 		}
 	}
 	return nil

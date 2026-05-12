@@ -9,6 +9,10 @@ import (
 
 type PublisherFunc[T any] func(context.Context, T) error
 
+type BatchPublisher[T any] interface {
+	PublishBatch(context.Context, []T) error
+}
+
 func (f PublisherFunc[T]) Publish(ctx context.Context, payload T) error {
 	return f(ctx, payload)
 }

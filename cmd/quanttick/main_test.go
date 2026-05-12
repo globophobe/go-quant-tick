@@ -3,17 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 	"github.com/globophobe/go-quant-tick/quanttick/exchanges"
+	_ "modernc.org/sqlite"
 )
 
-func TestPublishStreamsDefaultsToSignificantTrades(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "")
+func TestWebSocketDataStreamsDefaultsToSignificantTrades(t *testing.T) {
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "")
 
-	streams, err := publishStreams()
+	streams, err := websocketDataStreams()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,17 +24,17 @@ func TestPublishStreamsDefaultsToSignificantTrades(t *testing.T) {
 	}
 }
 
-func TestPublishStreamsRejectsUnknownStream(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "raw-trades,unknown")
+func TestWebSocketDataStreamsRejectsUnknownStream(t *testing.T) {
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "raw-trades,unknown")
 
-	if _, err := publishStreams(); err == nil {
+	if _, err := websocketDataStreams(); err == nil {
 		t.Fatal("expected error for unknown stream")
 	}
 }
 
-func TestPublisherModeDefaultsToPubSub(t *testing.T) {
-	if got := publisherMode(""); got != "pubsub" {
-		t.Fatalf("publisher mode = %s, want pubsub", got)
+func TestPublisherModeDefaultsToDB(t *testing.T) {
+	if got := publisherMode(""); got != "db" {
+		t.Fatalf("publisher mode = %s, want db", got)
 	}
 }
 
@@ -43,10 +45,10 @@ func TestPublisherModeNormalizesValue(t *testing.T) {
 }
 
 func TestNewPipelineFromEnvUsesStdoutPublisher(t *testing.T) {
-	t.Setenv("PUBLISH_STREAMS", "raw-trades")
+	t.Setenv("WEBSOCKET_DATA_STREAMS", "raw-trades")
 
 	var output bytes.Buffer
-	pipeline, cleanup, err := newPipelineFromEnv(context.Background(), &output, nil, "stdout")
+	pipeline, cleanup, _, err := newPipelineFromEnv(context.Background(), &output, nil, "stdout")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,16 +59,47 @@ func TestNewPipelineFromEnvUsesStdoutPublisher(t *testing.T) {
 	}
 }
 
-func TestNewPipelineFromEnvDefaultsToPubSub(t *testing.T) {
-	t.Setenv("PROJECT_ID", "")
+func TestNewPipelineFromEnvUsesDatabasePublisher(t *testing.T) {
+	oldOpenDatabase := openDatabaseFunc
+	t.Cleanup(func() { openDatabaseFunc = oldOpenDatabase })
+	openDatabaseFunc = func(context.Context) (*sql.DB, func() error, error) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			return nil, nil, err
+		}
+		return db, db.Close, nil
+	}
 
-	if _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, ""); err == nil {
-		t.Fatal("expected missing project id error")
+	pipeline, cleanup, flusher, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if pipeline.SignificantPublisher == nil {
+		t.Fatal("significant publisher should be configured")
+	}
+	if flusher == nil {
+		t.Fatal("database publisher should return a bucket flusher")
+	}
+}
+
+func TestNewPipelineFromEnvDefaultsToDatabase(t *testing.T) {
+	if _, _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, ""); err == nil {
+		t.Fatal("expected missing database config error")
+	}
+}
+
+func TestCloudSQLInstanceConnectionNameStripsSocketPrefix(t *testing.T) {
+	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:dqt")
+
+	if got := cloudSQLInstanceConnectionName(); got != "project:region:dqt" {
+		t.Fatalf("instance connection name = %s, want project:region:dqt", got)
 	}
 }
 
 func TestNewPipelineFromEnvRejectsUnknownPublisher(t *testing.T) {
-	if _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "unknown"); err == nil {
+	if _, _, _, err := newPipelineFromEnv(context.Background(), &bytes.Buffer{}, nil, "unknown"); err == nil {
 		t.Fatal("expected unknown publisher error")
 	}
 }
@@ -74,7 +107,7 @@ func TestNewPipelineFromEnvRejectsUnknownPublisher(t *testing.T) {
 func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
-	symbols, thresholds, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName, []string{"BTCUSDT"})
+	symbols, thresholds, err := exchangeSymbolsEnv("BINANCE_SYMBOLS", exchanges.BinanceName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,24 +128,14 @@ func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 }
 
 func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
-	for _, name := range []string{
-		"BINANCE_SYMBOLS",
-		"BINANCE_FUTURES_SYMBOLS",
-		"COINBASE_SYMBOLS",
-		"BITFINEX_SYMBOLS",
-		"BITMEX_SYMBOLS",
-		"HYPERLIQUID_SYMBOLS",
-	} {
-		t.Setenv(name, "")
-	}
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(clients) != defaultExchangeConfigCount() {
-		t.Fatalf("clients = %d, want %d", len(clients), defaultExchangeConfigCount())
+	if len(clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(clients))
 	}
 
 	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BinanceName, "BTCUSDT")]
@@ -125,16 +148,6 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 }
 
 func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
-	for _, name := range []string{
-		"BINANCE_SYMBOLS",
-		"BINANCE_FUTURES_SYMBOLS",
-		"COINBASE_SYMBOLS",
-		"BITFINEX_SYMBOLS",
-		"BITMEX_SYMBOLS",
-		"HYPERLIQUID_SYMBOLS",
-	} {
-		t.Setenv(name, "")
-	}
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
@@ -142,7 +155,7 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := defaultExchangeConfigCount()
+	wantClients := 2
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
@@ -195,26 +208,6 @@ func TestRuntimeFlushTimeoutReadsDuration(t *testing.T) {
 	}
 }
 
-func TestPubSubPublisherConfigFromEnvReadsSettings(t *testing.T) {
-	t.Setenv("PUBLISH_TIMEOUT", "1500ms")
-
-	config, err := pubSubPublisherConfigFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Timeout != 1500*time.Millisecond {
-		t.Fatalf("publish timeout = %s, want 1500ms", config.Timeout)
-	}
-}
-
-func TestPubSubPublisherConfigFromEnvRejectsInvalidDuration(t *testing.T) {
-	t.Setenv("PUBLISH_TIMEOUT", "bad")
-
-	if _, err := pubSubPublisherConfigFromEnv(); err == nil {
-		t.Fatal("expected invalid publish timeout error")
-	}
-}
-
 func TestShutdownFlushTimeoutReadsDuration(t *testing.T) {
 	t.Setenv("SHUTDOWN_FLUSH_TIMEOUT", "3s")
 
@@ -231,12 +224,17 @@ func TestShutdownFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
 	}
 }
 
-func defaultExchangeConfigCount() int {
-	var count int
-	for _, config := range exchangeEnvConfigs {
-		if len(config.defaults) != 0 {
-			count++
-		}
+func TestExchangesFromEnvWithBlankSymbolsDoesNothing(t *testing.T) {
+	t.Setenv("BINANCE_SYMBOLS", "")
+
+	clients, thresholds, err := exchangesFromEnv()
+	if err != nil {
+		t.Fatal(err)
 	}
-	return count
+	if len(clients) != 0 {
+		t.Fatalf("clients = %d, want 0", len(clients))
+	}
+	if len(thresholds) != 0 {
+		t.Fatalf("thresholds = %#v, want empty", thresholds)
+	}
 }

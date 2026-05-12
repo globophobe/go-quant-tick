@@ -163,6 +163,9 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) er
 	for {
 		messageType, data, err := conn.Read(ctx)
 		if err != nil {
+			if isNormalWebSocketClose(err) {
+				return nil
+			}
 			return fmt.Errorf("read bitmex websocket: %w", err)
 		}
 		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
