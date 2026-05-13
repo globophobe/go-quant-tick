@@ -53,7 +53,7 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 				{
 					"trdMatchID": "a",
 					"symbol": "XBTUSD",
-					"timestamp": "2026-04-08T00:00:00.000Z",
+					"timestamp": "2026-04-08T00:00:00.123456789Z",
 					"side": "Buy",
 					"price": 100.0,
 					"homeNotional": "1.5"
@@ -78,12 +78,13 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 	assertStrings(t, tradeExchanges(trades), []string{BitmexName, BitmexName})
 	assertStrings(t, tradeSymbols(trades), []string{"XBTUSD", "XBTUSD"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1})
+	assertInts(t, tradeNanoseconds(trades), []int{789, 0})
 	assertDecimals(t, tradePrices(trades), []string{"100.0", "200.0"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1.5", "2"})
 	assertDecimals(t, tradeVolumes(trades), []string{"150.00", "400.0"})
 
 	wantTimes := []time.Time{
-		time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 8, 0, 0, 0, 123456000, time.UTC),
 		time.Date(2026, 4, 8, 0, 0, 1, 0, time.UTC),
 	}
 	for i, want := range wantTimes {

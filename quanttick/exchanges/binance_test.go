@@ -271,6 +271,14 @@ func tradeTickRules(trades []quanttick.TradeEvent) []int {
 	return values
 }
 
+func tradeNanoseconds(trades []quanttick.TradeEvent) []int {
+	values := make([]int, len(trades))
+	for i, trade := range trades {
+		values[i] = trade.Nanoseconds
+	}
+	return values
+}
+
 func tradeSequential(trades []quanttick.TradeEvent) []bool {
 	values := make([]bool, len(trades))
 	for i, trade := range trades {

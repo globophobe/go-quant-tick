@@ -121,6 +121,7 @@ func (b *Bitmex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quantti
 		if err != nil {
 			return nil, fmt.Errorf("parse bitmex timestamp: %w", err)
 		}
+		timestamp, nanoseconds := splitEventTimestamp(timestamp)
 
 		tickRule := -1
 		if strings.ToLower(rawTrade.Side) == "buy" {
@@ -128,14 +129,15 @@ func (b *Bitmex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quantti
 		}
 
 		trades = append(trades, quanttick.NewTradeEvent(quanttick.TradeEventInput{
-			Exchange:   BitmexName,
-			UID:        rawTrade.TradeMatchID,
-			Symbol:     rawTrade.Symbol,
-			Timestamp:  timestamp.UTC(),
-			ReceivedAt: receivedAt,
-			Price:      price,
-			Notional:   notional,
-			TickRule:   tickRule,
+			Exchange:    BitmexName,
+			UID:         rawTrade.TradeMatchID,
+			Symbol:      rawTrade.Symbol,
+			Timestamp:   timestamp,
+			Nanoseconds: nanoseconds,
+			ReceivedAt:  receivedAt,
+			Price:       price,
+			Notional:    notional,
+			TickRule:    tickRule,
 		}))
 	}
 

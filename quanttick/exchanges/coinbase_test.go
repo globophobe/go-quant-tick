@@ -29,7 +29,7 @@ func TestCoinbaseParseTradeMessages(t *testing.T) {
 	exchange := NewCoinbase([]string{"BTC-USD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 	messages := []string{
-		`{"type":"match","trade_id":100,"product_id":"BTC-USD","time":"2026-04-08T00:00:00Z","price":"100","size":"1","side":"buy"}`,
+		`{"type":"match","trade_id":100,"product_id":"BTC-USD","time":"2026-04-08T00:00:00.123456789Z","price":"100","size":"1","side":"buy"}`,
 		`{"type":"match","trade_id":101,"product_id":"BTC-USD","time":"2026-04-08T00:00:01Z","price":"101","size":"2","side":"sell"}`,
 		`{"type":"match","trade_id":103,"product_id":"BTC-USD","time":"2026-04-08T00:00:02Z","price":"102","size":"3","side":"buy"}`,
 	}
@@ -41,12 +41,13 @@ func TestCoinbaseParseTradeMessages(t *testing.T) {
 	assertStrings(t, tradeExchanges(trades), []string{CoinbaseName, CoinbaseName, CoinbaseName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTC-USD", "BTC-USD", "BTC-USD"})
 	assertInts(t, tradeTickRules(trades), []int{-1, 1, -1})
+	assertInts(t, tradeNanoseconds(trades), []int{789, 0, 0})
 	assertDecimals(t, tradePrices(trades), []string{"100", "101", "102"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1", "2", "3"})
 	assertDecimals(t, tradeVolumes(trades), []string{"100", "202", "306"})
 
 	wantTimes := []time.Time{
-		time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 8, 0, 0, 0, 123456000, time.UTC),
 		time.Date(2026, 4, 8, 0, 0, 1, 0, time.UTC),
 		time.Date(2026, 4, 8, 0, 0, 2, 0, time.UTC),
 	}
