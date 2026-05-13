@@ -123,30 +123,6 @@ func (a *SignificantTradeAggregator) Flush(key string) ([]SignificantTrade, erro
 	return []SignificantTrade{tick}, nil
 }
 
-// DueKeys returns pending exchange-symbol aggregation keys with expired windows.
-func (a *SignificantTradeAggregator) DueKeys(now time.Time) []string {
-	if a.windowDuration <= 0 {
-		return nil
-	}
-
-	keys := pendingKeys(a.trades)
-	due := keys[:0]
-	for _, key := range keys {
-		win, ok := a.windows[key]
-		if ok && !now.Before(win.stop) {
-			due = append(due, key)
-		}
-	}
-	return due
-}
-
-// DueSymbols returns due aggregation keys.
-//
-// Deprecated: use DueKeys.
-func (a *SignificantTradeAggregator) DueSymbols(now time.Time) []string {
-	return a.DueKeys(now)
-}
-
 func (a *SignificantTradeAggregator) getSignificantTradeOrTick(trade TradeEvent) ([]SignificantTrade, error) {
 	key := tradeKey(trade)
 	a.trades[key] = append(a.trades[key], trade)

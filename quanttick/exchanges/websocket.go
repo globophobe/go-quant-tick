@@ -3,6 +3,7 @@ package exchanges
 import (
 	"errors"
 	"io"
+	"syscall"
 
 	"github.com/coder/websocket"
 )
@@ -10,7 +11,7 @@ import (
 const maxWebSocketMessageBytes int64 = 16 << 20
 
 func isNormalWebSocketClose(err error) bool {
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 	switch websocket.CloseStatus(err) {

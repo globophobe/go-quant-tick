@@ -200,14 +200,6 @@ func TestSignificantThresholdAllowsZero(t *testing.T) {
 	}
 }
 
-func TestRuntimeFlushTimeoutReadsDuration(t *testing.T) {
-	t.Setenv("FLUSH_TIMEOUT", "3s")
-
-	if got := runtimeFlushTimeout(); got != 3*time.Second {
-		t.Fatalf("timeout = %s, want 3s", got)
-	}
-}
-
 func TestShutdownFlushTimeoutReadsDuration(t *testing.T) {
 	t.Setenv("SHUTDOWN_FLUSH_TIMEOUT", "3s")
 

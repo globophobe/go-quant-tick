@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestWebSocketDataBufferWritesClosedMinuteBucket(t *testing.T) {
+func TestWebSocketDataBufferFlushesPreviousMinuteOnLaterTradeEvent(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	buffer := NewWebSocketDataBuffer(
 		NewWebSocketDataStore(db),
@@ -41,7 +41,12 @@ func TestWebSocketDataBufferWritesClosedMinuteBucket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err := buffer.FlushDue(context.Background(), timestamp.Add(time.Minute))
+	count, err := buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(time.Minute),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +69,7 @@ func TestWebSocketDataBufferWritesClosedMinuteBucket(t *testing.T) {
 	}
 }
 
-func TestWebSocketDataBufferKeepsOpenMinuteInMemory(t *testing.T) {
+func TestWebSocketDataBufferKeepsCurrentEventMinuteInMemory(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	buffer := NewWebSocketDataBuffer(
 		NewWebSocketDataStore(db),
@@ -82,7 +87,12 @@ func TestWebSocketDataBufferKeepsOpenMinuteInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err := buffer.FlushDue(context.Background(), timestamp.Add(time.Minute-time.Nanosecond))
+	count, err := buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(30*time.Second),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +103,12 @@ func TestWebSocketDataBufferKeepsOpenMinuteInMemory(t *testing.T) {
 		t.Fatal("open minute should not be written")
 	}
 
-	count, err = buffer.FlushDue(context.Background(), timestamp.Add(time.Minute))
+	count, err = buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(time.Minute),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +150,12 @@ func TestWebSocketDataBufferUsesSymbolThreshold(t *testing.T) {
 	if err := buffer.RawPublisher().Publish(context.Background(), raw); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buffer.FlushDue(context.Background(), timestamp.Add(time.Minute)); err != nil {
+	if _, err := buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(time.Minute),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +165,7 @@ func TestWebSocketDataBufferUsesSymbolThreshold(t *testing.T) {
 	}
 }
 
-func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
+func TestWebSocketDataBufferKeepsSameMinuteEventsInSameBucketBeforeNextMinute(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	buffer := NewWebSocketDataBuffer(
 		NewWebSocketDataStore(db),
@@ -157,8 +177,17 @@ func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
 	if err := buffer.SignificantPublisher().Publish(context.Background(), filtered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buffer.FlushDue(context.Background(), timestamp.Add(time.Minute)); err != nil {
+	count, err := buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(30*time.Second),
+	)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("flushed buckets = %d, want 0", count)
 	}
 
 	raw := testTrade(
@@ -170,7 +199,12 @@ func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
 	if err := buffer.RawPublisher().Publish(context.Background(), raw); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buffer.FlushDue(context.Background(), timestamp.Add(time.Minute)); err != nil {
+	if _, err := buffer.FlushBefore(
+		context.Background(),
+		"coinbase",
+		"BTC-USD",
+		timestamp.Add(time.Minute),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -178,8 +212,50 @@ func TestWebSocketDataStoreReplacesExistingBucket(t *testing.T) {
 	if len(row.rawTrades) != 1 || row.rawTrades[0].UID != "raw-1" {
 		t.Fatalf("raw trades = %#v", row.rawTrades)
 	}
-	if len(row.filteredTrades) != 0 {
-		t.Fatalf("filtered trades should be replaced with empty payload: %#v", row.filteredTrades)
+	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+}
+
+func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	existing := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		FilteredTrades:         []SignificantTrade{testSignificantTrade("filtered-1", timestamp.Add(10*time.Second))},
+	}
+	incoming := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"raw-1",
+				timestamp.Add(20*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+			),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{existing}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{incoming}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.rawTrades) != 1 || row.rawTrades[0].UID != "raw-1" {
+		t.Fatalf("raw trades = %#v", row.rawTrades)
+	}
+	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
 	}
 }
 

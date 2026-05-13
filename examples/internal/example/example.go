@@ -27,19 +27,9 @@ func Run(exchange quanttick.Exchange, thresholdOverrides ...map[string]quanttick
 		SignificantThresholds: mergeThresholds(thresholdOverrides...),
 		WindowDuration:        time.Minute,
 	})
-	alignedFlushCtx, stopAlignedFlush := context.WithCancel(ctx)
-	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
-		Interval: time.Minute,
-		Timeout:  10 * time.Second,
-		ErrorHandler: func(err error) {
-			log.Printf("%s flush error: %v", exchange.Name(), err)
-		},
-	})
-
 	runErr := quanttick.RunExchanges(ctx, []quanttick.Exchange{exchange}, pipeline.Handle, func(err error) {
 		log.Printf("%s error: %v", exchange.Name(), err)
 	})
-	stopAlignedFlush()
 
 	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

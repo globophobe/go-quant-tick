@@ -117,28 +117,6 @@ func (p *TradePipeline) Flush(ctx context.Context) error {
 	return p.flushSignificantTrades(ctx)
 }
 
-func (p *TradePipeline) FlushDue(ctx context.Context, now time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.significantAggregator == nil || p.significantAggregator.windowDuration <= 0 {
-		return nil
-	}
-	if err := p.flushAggregatedTrades(ctx); err != nil {
-		return err
-	}
-	for _, key := range p.significantAggregator.DueKeys(now) {
-		significantTrades, err := p.significantAggregator.Flush(key)
-		if err != nil {
-			return fmt.Errorf("flush due significant trades: %w", err)
-		}
-		if err := p.publishSignificantTrades(ctx, significantTrades); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (p *TradePipeline) flushAggregatedTrades(ctx context.Context) error {
 	if p.tradeAggregator != nil {
 		for _, key := range pendingKeys(p.tradeAggregator.trades) {
@@ -181,60 +159,6 @@ func (p *TradePipeline) flushSignificantTrades(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-type AlignedFlushConfig struct {
-	Interval     time.Duration
-	Timeout      time.Duration
-	AfterFlush   func(context.Context, time.Time) error
-	ErrorHandler ErrorHandler
-}
-
-func StartAlignedFlush(ctx context.Context, pipeline *TradePipeline, config AlignedFlushConfig) {
-	if pipeline == nil {
-		return
-	}
-
-	interval := config.Interval
-	if interval <= 0 {
-		return
-	}
-	timeout := config.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-
-	go func() {
-		for {
-			next := nextAlignedTime(time.Now(), interval)
-			timer := time.NewTimer(time.Until(next))
-			select {
-			case <-timer.C:
-				flushCtx, cancel := context.WithTimeout(context.Background(), timeout)
-				now := time.Now()
-				err := pipeline.FlushDue(flushCtx, now)
-				if err == nil && config.AfterFlush != nil {
-					err = config.AfterFlush(flushCtx, now)
-				}
-				cancel()
-				if err != nil && config.ErrorHandler != nil {
-					config.ErrorHandler(err)
-				}
-			case <-ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return
-			}
-		}
-	}()
-}
-
-func nextAlignedTime(now time.Time, interval time.Duration) time.Time {
-	return now.Truncate(interval).Add(interval)
 }
 
 func (p *TradePipeline) publishSignificantTrades(ctx context.Context, trades []SignificantTrade) error {

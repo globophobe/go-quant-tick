@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -160,9 +161,10 @@ func (b *WebSocketDataBuffer) bucket(key websocketDataBucketKey) WebSocketDataBu
 	}
 }
 
-func (b *WebSocketDataBuffer) FlushDue(ctx context.Context, now time.Time) (int, error) {
+func (b *WebSocketDataBuffer) FlushBefore(ctx context.Context, exchange string, symbol string, timestamp time.Time) (int, error) {
+	boundary := timestamp.UTC().Truncate(time.Minute)
 	return b.flush(ctx, func(key websocketDataBucketKey) bool {
-		return !key.timestamp.Add(time.Minute).After(now.UTC())
+		return key.exchange == exchange && key.symbol == symbol && key.timestamp.Before(boundary)
 	})
 }
 
@@ -258,6 +260,10 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 	defer tx.Rollback()
 
 	for _, bucket := range buckets {
+		bucket, err = mergeExistingWebSocketDataBucket(ctx, tx, bucket)
+		if err != nil {
+			return err
+		}
 		rawTrades, err := marshalJSONList(bucket.RawTrades)
 		if err != nil {
 			return fmt.Errorf("marshal raw trades: %w", err)
@@ -294,6 +300,80 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 	return nil
 }
 
+func mergeExistingWebSocketDataBucket(ctx context.Context, tx *sql.Tx, bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	var rawTradesPayload, aggregatedTradesPayload, filteredTradesPayload string
+	err := tx.QueryRowContext(
+		ctx,
+		selectWebSocketDataSQL,
+		bucket.Exchange,
+		bucket.APISymbol,
+		bucket.SignificantTradeFilter,
+		bucket.Timestamp,
+	).Scan(&rawTradesPayload, &aggregatedTradesPayload, &filteredTradesPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return bucket, nil
+	}
+	if err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("read existing websocket data bucket %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+	}
+
+	var rawTrades []TradeEvent
+	if err := unmarshalJSONList(rawTradesPayload, &rawTrades); err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("parse existing raw trades: %w", err)
+	}
+	var aggregatedTrades []TradeEvent
+	if err := unmarshalJSONList(aggregatedTradesPayload, &aggregatedTrades); err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("parse existing aggregated trades: %w", err)
+	}
+	var filteredTrades []SignificantTrade
+	if err := unmarshalJSONList(filteredTradesPayload, &filteredTrades); err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("parse existing filtered trades: %w", err)
+	}
+
+	bucket.RawTrades = mergeTradesByUID(rawTrades, bucket.RawTrades)
+	bucket.AggregatedTrades = mergeTradesByUID(aggregatedTrades, bucket.AggregatedTrades)
+	bucket.FilteredTrades = mergeSignificantTradesByUID(filteredTrades, bucket.FilteredTrades)
+	return bucket, nil
+}
+
+func mergeTradesByUID(existing []TradeEvent, incoming []TradeEvent) []TradeEvent {
+	return mergeByUID(existing, incoming, func(trade TradeEvent) string { return trade.UID })
+}
+
+func mergeSignificantTradesByUID(existing []SignificantTrade, incoming []SignificantTrade) []SignificantTrade {
+	return mergeByUID(existing, incoming, func(trade SignificantTrade) string { return trade.UID })
+}
+
+func mergeByUID[T any](existing []T, incoming []T, getUID func(T) string) []T {
+	if len(existing) == 0 {
+		return incoming
+	}
+	if len(incoming) == 0 {
+		return existing
+	}
+	merged := append([]T(nil), existing...)
+	seen := make(map[string]struct{}, len(existing))
+	for _, item := range existing {
+		uid := getUID(item)
+		if uid != "" {
+			seen[uid] = struct{}{}
+		}
+	}
+	for _, item := range incoming {
+		uid := getUID(item)
+		if uid == "" {
+			merged = append(merged, item)
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		merged = append(merged, item)
+	}
+	return merged
+}
+
 func deleteOldWebSocketData(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
 	if _, err := tx.ExecContext(ctx, deleteOldWebSocketDataSQL, cutoff); err != nil {
 		return fmt.Errorf("delete old websocket data rows: %w", err)
@@ -307,6 +387,22 @@ func marshalJSONList[T any](values []T) ([]byte, error) {
 	}
 	return json.Marshal(values)
 }
+
+func unmarshalJSONList[T any](payload string, values *[]T) error {
+	if payload == "" {
+		*values = nil
+		return nil
+	}
+	return json.Unmarshal([]byte(payload), values)
+}
+
+const selectWebSocketDataSQL = `
+SELECT raw_trades, aggregated_trades, filtered_trades
+FROM quant_tick_websocket_data
+WHERE exchange = $1
+	AND api_symbol = $2
+	AND significant_trade_filter = $3
+	AND timestamp = $4`
 
 const upsertWebSocketDataSQL = `
 INSERT INTO quant_tick_websocket_data (

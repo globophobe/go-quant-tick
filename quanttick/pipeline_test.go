@@ -165,57 +165,6 @@ func TestTradePipelineFlushPublishesPendingSignificantContextTick(t *testing.T) 
 	assertDecimal(t, significant.payloads[0].TotalVolume, "100")
 }
 
-func TestTradePipelineFlushDuePublishesContextTickAtWindowBoundary(t *testing.T) {
-	significant := &memoryPublisher[SignificantTrade]{}
-	pipeline := NewTradePipeline(TradePipelineConfig{
-		SignificantPublisher: significant,
-		SignificantThreshold: MustDecimal("1000"),
-		WindowDuration:       time.Minute,
-	})
-	timestamp := time.Date(2026, 4, 8, 0, 0, 59, 0, time.UTC)
-	boundary := timestamp.Truncate(time.Minute).Add(time.Minute)
-
-	if err := pipeline.Handle(
-		context.Background(),
-		testTrade("1", timestamp, withPrice("100"), withNotional("1")),
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := pipeline.FlushDue(context.Background(), boundary.Add(-time.Nanosecond)); err != nil {
-		t.Fatal(err)
-	}
-	if len(significant.payloads) != 0 {
-		t.Fatalf("significant payloads before boundary = %d, want 0", len(significant.payloads))
-	}
-
-	if err := pipeline.FlushDue(context.Background(), boundary); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(significant.payloads) != 1 {
-		t.Fatalf("significant payloads at boundary = %d, want 1", len(significant.payloads))
-	}
-	payload := significant.payloads[0]
-	if payload.Volume != nil {
-		t.Fatalf("significant context tick volume = %v, want nil", payload.Volume)
-	}
-	if !payload.Timestamp.Equal(timestamp) {
-		t.Fatalf("timestamp = %s, want %s", payload.Timestamp, timestamp)
-	}
-	assertDecimal(t, payload.TotalVolume, "100")
-}
-
-func TestNextAlignedTime(t *testing.T) {
-	now := time.Date(2026, 4, 8, 0, 0, 30, 123, time.UTC)
-	want := time.Date(2026, 4, 8, 0, 1, 0, 0, time.UTC)
-
-	got := nextAlignedTime(now, time.Minute)
-
-	if !got.Equal(want) {
-		t.Fatalf("next aligned time = %s, want %s", got, want)
-	}
-}
-
 func TestJSONLinesPublisherWritesEnvelope(t *testing.T) {
 	var output bytes.Buffer
 	publisher := NewJSONLinesPublisher[TradeEvent](&output, string(RawTrades), nil)

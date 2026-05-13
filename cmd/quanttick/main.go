@@ -59,29 +59,22 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	if err != nil {
 		return err
 	}
-	alignedFlushCtx, stopAlignedFlush := context.WithCancel(ctx)
-	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
-		Interval: time.Minute,
-		Timeout:  runtimeFlushTimeout(),
-		AfterFlush: func(ctx context.Context, now time.Time) error {
-			dueFlusher, ok := bucketFlusher.(interface {
-				FlushDue(context.Context, time.Time) (int, error)
-			})
-			if !ok {
-				return nil
+	handler := pipeline.Handle
+	if eventFlusher, ok := bucketFlusher.(interface {
+		FlushBefore(context.Context, string, string, time.Time) (int, error)
+	}); ok {
+		handler = func(ctx context.Context, trade quanttick.TradeEvent) error {
+			if err := pipeline.Handle(ctx, trade); err != nil {
+				return err
 			}
-			_, err := dueFlusher.FlushDue(ctx, now)
+			_, err := eventFlusher.FlushBefore(ctx, trade.Exchange, trade.Symbol, trade.Timestamp)
 			return err
-		},
-		ErrorHandler: func(err error) {
-			log.Printf("pipeline timer flush error: %v", err)
-			reporter.Capture(err)
-		},
-	})
+		}
+	}
 
 	var runErr error
 	if hasTradeStreams(streams) && len(clients) > 0 {
-		runErr = quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
+		runErr = quanttick.RunExchanges(ctx, clients, handler, func(err error) {
 			log.Printf("exchange error: %v", err)
 			reporter.Capture(err)
 		})
@@ -91,7 +84,6 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			runErr = ctx.Err()
 		}
 	}
-	stopAlignedFlush()
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
 		if runErr == nil {
@@ -472,10 +464,6 @@ func flushPipeline(pipeline *quanttick.TradePipeline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout())
 	defer cancel()
 	return pipeline.Flush(ctx)
-}
-
-func runtimeFlushTimeout() time.Duration {
-	return durationEnvDefault("FLUSH_TIMEOUT", 5*time.Second)
 }
 
 func shutdownFlushTimeout() time.Duration {
