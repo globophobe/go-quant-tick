@@ -40,7 +40,7 @@ func TestCoinbaseParseTradeMessages(t *testing.T) {
 	assertBools(t, tradeSequential(trades), []bool{true, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{CoinbaseName, CoinbaseName, CoinbaseName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTC-USD", "BTC-USD", "BTC-USD"})
-	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
+	assertInts(t, tradeTickRules(trades), []int{-1, 1, -1})
 	assertDecimals(t, tradePrices(trades), []string{"100", "101", "102"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1", "2", "3"})
 	assertDecimals(t, tradeVolumes(trades), []string{"100", "202", "306"})

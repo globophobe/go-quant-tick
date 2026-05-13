@@ -108,9 +108,9 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 
 	prevID, hadPrevID := c.lastIDs[msg.ProductID]
 	c.lastIDs[msg.ProductID] = msg.TradeID
-	tickRule := 1
+	tickRule := -1
 	if strings.ToLower(msg.Side) == "sell" {
-		tickRule = -1
+		tickRule = 1
 	}
 
 	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
