@@ -161,10 +161,10 @@ func (b *Bitfinex) parseArrayMessage(data []byte, receivedAt time.Time) ([]quant
 	if err != nil {
 		return nil, err
 	}
-	if !ok || tag == "hb" || tag == "tu" {
+	if !ok || tag == "hb" || tag == "te" {
 		return nil, nil
 	}
-	if tag != "te" || len(msg) < 3 {
+	if tag != "tu" || len(msg) < 3 {
 		return nil, nil
 	}
 
@@ -211,7 +211,7 @@ func (b *Bitfinex) parseArrayMessage(data []byte, receivedAt time.Time) ([]quant
 			Price:        price,
 			Notional:     notional,
 			TickRule:     tickRule,
-			IsSequential: !hadPrevID || tradeID > prevID,
+			IsSequential: hadPrevID && tradeID > prevID,
 		}),
 	}, nil
 }

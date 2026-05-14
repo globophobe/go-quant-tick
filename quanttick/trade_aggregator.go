@@ -70,6 +70,7 @@ func aggregateTrades(trades []TradeEvent) (TradeEvent, error) {
 	totalVolume := Decimal{}
 	totalNotional := Decimal{}
 	totalTicks := 0
+	allSequential := true
 	for _, trade := range trades {
 		if !sameSample(first, trade) {
 			return TradeEvent{}, fmt.Errorf("trade sample mismatch for %s", tradeKey(first))
@@ -77,12 +78,14 @@ func aggregateTrades(trades []TradeEvent) (TradeEvent, error) {
 		totalVolume = totalVolume.Add(trade.Volume)
 		totalNotional = totalNotional.Add(trade.Notional)
 		totalTicks += trade.Ticks
+		allSequential = allSequential && trade.IsSequential
 	}
 
 	last.UID = first.UID
 	last.Volume = totalVolume
 	last.Notional = totalNotional
 	last.Ticks = totalTicks
+	last.IsSequential = allSequential
 	return last, nil
 }
 

@@ -225,7 +225,6 @@ func (a *SignificantTradeAggregator) aggregate(trades []TradeEvent, isLate bool)
 		result.Notional = decimalPtr(significant.Notional)
 		result.TickRule = intPtr(significant.TickRule)
 		result.Ticks = intPtr(significant.Ticks)
-		result.IsSequential = significant.IsSequential
 	}
 
 	return result, nil

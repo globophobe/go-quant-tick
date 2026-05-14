@@ -123,7 +123,7 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
-		IsSequential: !hadPrevID || msg.TradeID == prevID+1,
+		IsSequential: hadPrevID && msg.TradeID == prevID+1,
 	}), true, nil
 }
 

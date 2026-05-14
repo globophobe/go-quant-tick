@@ -72,7 +72,7 @@ func TestBinanceParseTradeMessages(t *testing.T) {
 
 	assertStrings(t, tradeUIDs(trades), []string{"100", "101", "103"})
 	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
-	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{BinanceName, BinanceName, BinanceName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
@@ -118,7 +118,7 @@ func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
 
 	assertStrings(t, tradeUIDs(trades), []string{"200", "201", "203"})
 	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
-	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{BinanceFuturesName, BinanceFuturesName, BinanceFuturesName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})

@@ -165,7 +165,7 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
-		IsSequential: !hadPrevID || tradeID == prevID+1,
+		IsSequential: hadPrevID && tradeID == prevID+1,
 	}), true, nil
 }
 

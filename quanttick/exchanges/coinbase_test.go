@@ -37,7 +37,7 @@ func TestCoinbaseParseTradeMessages(t *testing.T) {
 	trades := parseCoinbaseFixture(t, exchange, messages, receivedAt)
 
 	assertStrings(t, tradeUIDs(trades), []string{"100", "101", "103"})
-	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{CoinbaseName, CoinbaseName, CoinbaseName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTC-USD", "BTC-USD", "BTC-USD"})
 	assertInts(t, tradeTickRules(trades), []int{-1, 1, -1})
