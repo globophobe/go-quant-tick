@@ -56,16 +56,18 @@ func TestBitfinexParseTradeMessages(t *testing.T) {
 	messages := []string{
 		`{"event":"subscribed","chanId":1,"symbol":"tBTCUSD"}`,
 		`[1,"hb"]`,
-		`[1,"te",[999,1775557139000,1,99]]`,
-		`[1,"tu",[100,1775557140000,1,100]]`,
-		`[1,"tu",[102,1775557141000,-2,101]]`,
-		`[1,"tu",[101,1775557142000,3,102]]`,
+		`[1,"te",[100,1775557139000,1,99]]`,
+		`[1,"te",[102,1775557140000,1,100]]`,
+		`[1,"te",[103,1775557141000,1,101]]`,
+		`[1,"tu",[102,1775557141001,-2,101]]`,
+		`[1,"tu",[100,1775557140001,1,100]]`,
+		`[1,"tu",[103,1775557142001,3,102]]`,
 	}
 
 	trades := parseBitfinexFixture(t, exchange, messages, receivedAt)
 
-	assertStrings(t, tradeUIDs(trades), []string{"100", "102", "101"})
-	assertBools(t, tradeSequential(trades), []bool{false, true, false})
+	assertStrings(t, tradeUIDs(trades), []string{"100", "102", "103"})
+	assertBools(t, tradeSequential(trades), []bool{false, true, true})
 	assertStrings(t, tradeExchanges(trades), []string{BitfinexName, BitfinexName, BitfinexName})
 	assertStrings(t, tradeSymbols(trades), []string{"tBTCUSD", "tBTCUSD", "tBTCUSD"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
@@ -74,9 +76,9 @@ func TestBitfinexParseTradeMessages(t *testing.T) {
 	assertDecimals(t, tradeVolumes(trades), []string{"100", "202", "306"})
 
 	wantTimes := []time.Time{
-		time.Unix(1775557140, 0).UTC(),
-		time.Unix(1775557141, 0).UTC(),
-		time.Unix(1775557142, 0).UTC(),
+		time.UnixMilli(1775557140001).UTC(),
+		time.UnixMilli(1775557141001).UTC(),
+		time.UnixMilli(1775557142001).UTC(),
 	}
 	for i, want := range wantTimes {
 		if !trades[i].Timestamp.Equal(want) {
@@ -111,11 +113,40 @@ func TestBitfinexParseIgnoresExecuteAndPublishesUpdate(t *testing.T) {
 	assertDecimals(t, tradeNotionals(trades), []string{"2"})
 }
 
+func TestBitfinexQueuesUpdatesUntilExecuteOrderIsConfirmed(t *testing.T) {
+	exchange := NewBitfinex([]string{"tBTCUSD"})
+	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+
+	messages := []string{
+		`{"event":"subscribed","chanId":1,"symbol":"tBTCUSD"}`,
+		`[1,"te",[100,1775557140000,1,100]]`,
+		`[1,"te",[101,1775557140001,1,101]]`,
+		`[1,"tu",[101,1775557141001,1,101]]`,
+	}
+	trades := parseBitfinexFixture(t, exchange, messages, receivedAt)
+	if len(trades) != 0 {
+		t.Fatalf("expected later update to wait for queue head, got %#v", trades)
+	}
+
+	trades = parseBitfinexFixture(
+		t,
+		exchange,
+		[]string{`[1,"tu",[100,1775557141000,1,100]]`},
+		receivedAt,
+	)
+	assertStrings(t, tradeUIDs(trades), []string{"100", "101"})
+	assertBools(t, tradeSequential(trades), []bool{false, true})
+	if !trades[0].Timestamp.Equal(time.UnixMilli(1775557141000).UTC()) {
+		t.Fatalf("timestamp = %s, want finalized tu timestamp", trades[0].Timestamp)
+	}
+}
+
 func TestBitfinexDerivativeSymbolParseTradeMessages(t *testing.T) {
 	exchange := NewBitfinex([]string{"tBTCF0:USTF0"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 	messages := []string{
 		`{"event":"subscribed","chanId":1,"symbol":"tBTCF0:USTF0"}`,
+		`[1,"te",[100,1775606400000,1,100]]`,
 		`[1,"tu",[100,1775606400000,1,100]]`,
 	}
 
@@ -152,6 +183,7 @@ func TestBitfinexParsesStringNumericFields(t *testing.T) {
 	receivedAt := time.Now().UTC()
 	messages := []string{
 		`{"event":"subscribed","chanId":"1","symbol":"tBTCUSD"}`,
+		`["1","te",["100","1775557140000","-1.5","100.5"]]`,
 		`["1","tu",["100","1775557140000","-1.5","100.5"]]`,
 	}
 

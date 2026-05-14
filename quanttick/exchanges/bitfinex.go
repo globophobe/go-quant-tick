@@ -29,6 +29,9 @@ type Bitfinex struct {
 
 	channelSymbols map[int64]string
 	lastIDs        map[string]int64
+	pendingOrder   map[string][]int64
+	pendingOrderID map[string]map[int64]struct{}
+	pendingUpdates map[string]map[int64]bitfinexTradeUpdate
 }
 
 type BitfinexOption func(*Bitfinex)
@@ -40,6 +43,9 @@ func NewBitfinex(symbols []string, options ...BitfinexOption) *Bitfinex {
 		ReconnectDelay: time.Second,
 		channelSymbols: make(map[int64]string),
 		lastIDs:        make(map[string]int64),
+		pendingOrder:   make(map[string][]int64),
+		pendingOrderID: make(map[string]map[int64]struct{}),
+		pendingUpdates: make(map[string]map[int64]bitfinexTradeUpdate),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -161,59 +167,138 @@ func (b *Bitfinex) parseArrayMessage(data []byte, receivedAt time.Time) ([]quant
 	if err != nil {
 		return nil, err
 	}
-	if !ok || tag == "hb" || tag == "te" {
+	if !ok || tag == "hb" {
 		return nil, nil
 	}
-	if tag != "tu" || len(msg) < 3 {
+	if (tag != "te" && tag != "tu") || len(msg) < 3 {
 		return nil, nil
 	}
 
+	update, err := parseBitfinexTradeUpdate(msg[2], receivedAt)
+	if err != nil {
+		return nil, err
+	}
+	if update.TradeID == 0 {
+		return nil, nil
+	}
+
+	if tag == "te" {
+		b.enqueueBitfinexTrade(symbol, update.TradeID)
+	} else {
+		b.storeBitfinexTradeUpdate(symbol, update)
+	}
+	return b.emitReadyBitfinexTrades(symbol), nil
+}
+
+type bitfinexTradeUpdate struct {
+	TradeID         int64
+	TimestampMillis int64
+	Notional        quanttick.Decimal
+	Price           quanttick.Decimal
+	TickRule        int
+	ReceivedAt      time.Time
+}
+
+func parseBitfinexTradeUpdate(raw json.RawMessage, receivedAt time.Time) (bitfinexTradeUpdate, error) {
 	var rawTrade []json.RawMessage
-	if err := json.Unmarshal(msg[2], &rawTrade); err != nil {
-		return nil, fmt.Errorf("parse bitfinex trade: %w", err)
+	if err := json.Unmarshal(raw, &rawTrade); err != nil {
+		return bitfinexTradeUpdate{}, fmt.Errorf("parse bitfinex trade: %w", err)
 	}
 	if len(rawTrade) < 4 {
-		return nil, nil
+		return bitfinexTradeUpdate{}, nil
 	}
 
 	tradeID, err := parseRawInt64(rawTrade[0])
 	if err != nil {
-		return nil, fmt.Errorf("parse bitfinex trade id: %w", err)
+		return bitfinexTradeUpdate{}, fmt.Errorf("parse bitfinex trade id: %w", err)
 	}
 	timestampMillis, err := parseRawInt64(rawTrade[1])
 	if err != nil {
-		return nil, fmt.Errorf("parse bitfinex timestamp: %w", err)
+		return bitfinexTradeUpdate{}, fmt.Errorf("parse bitfinex timestamp: %w", err)
 	}
 	notional, err := parseRawDecimal(rawTrade[2])
 	if err != nil {
-		return nil, fmt.Errorf("parse bitfinex notional: %w", err)
+		return bitfinexTradeUpdate{}, fmt.Errorf("parse bitfinex notional: %w", err)
 	}
 	price, err := parseRawDecimal(rawTrade[3])
 	if err != nil {
-		return nil, fmt.Errorf("parse bitfinex price: %w", err)
+		return bitfinexTradeUpdate{}, fmt.Errorf("parse bitfinex price: %w", err)
 	}
 
-	prevID, hadPrevID := b.lastIDs[symbol]
-	b.lastIDs[symbol] = tradeID
 	tickRule := 1
 	if notional.IsNegative() {
 		tickRule = -1
 		notional = notional.Abs()
 	}
+	return bitfinexTradeUpdate{
+		TradeID:         tradeID,
+		TimestampMillis: timestampMillis,
+		Notional:        notional,
+		Price:           price,
+		TickRule:        tickRule,
+		ReceivedAt:      receivedAt,
+	}, nil
+}
 
-	return []quanttick.TradeEvent{
-		quanttick.NewTradeEvent(quanttick.TradeEventInput{
+func (b *Bitfinex) ensureBitfinexTradeState(symbol string) {
+	if b.pendingOrderID[symbol] == nil {
+		b.pendingOrderID[symbol] = make(map[int64]struct{})
+	}
+	if b.pendingUpdates[symbol] == nil {
+		b.pendingUpdates[symbol] = make(map[int64]bitfinexTradeUpdate)
+	}
+}
+
+func (b *Bitfinex) enqueueBitfinexTrade(symbol string, tradeID int64) {
+	if lastID, ok := b.lastIDs[symbol]; ok && tradeID <= lastID {
+		return
+	}
+	b.ensureBitfinexTradeState(symbol)
+	if _, ok := b.pendingOrderID[symbol][tradeID]; ok {
+		return
+	}
+	b.pendingOrder[symbol] = append(b.pendingOrder[symbol], tradeID)
+	b.pendingOrderID[symbol][tradeID] = struct{}{}
+}
+
+func (b *Bitfinex) storeBitfinexTradeUpdate(symbol string, update bitfinexTradeUpdate) {
+	if lastID, ok := b.lastIDs[symbol]; ok && update.TradeID <= lastID {
+		return
+	}
+	b.ensureBitfinexTradeState(symbol)
+	b.pendingUpdates[symbol][update.TradeID] = update
+}
+
+func (b *Bitfinex) emitReadyBitfinexTrades(symbol string) []quanttick.TradeEvent {
+	b.ensureBitfinexTradeState(symbol)
+	order := b.pendingOrder[symbol]
+	trades := make([]quanttick.TradeEvent, 0)
+	for len(order) > 0 {
+		tradeID := order[0]
+		update, ok := b.pendingUpdates[symbol][tradeID]
+		if !ok {
+			break
+		}
+		order = order[1:]
+		delete(b.pendingOrderID[symbol], tradeID)
+		delete(b.pendingUpdates[symbol], tradeID)
+
+		prevID, hadPrevID := b.lastIDs[symbol]
+		b.lastIDs[symbol] = tradeID
+		trades = append(trades, quanttick.NewTradeEvent(quanttick.TradeEventInput{
 			Exchange:     BitfinexName,
 			UID:          strconv.FormatInt(tradeID, 10),
 			Symbol:       symbol,
-			Timestamp:    time.UnixMilli(timestampMillis).UTC(),
-			ReceivedAt:   receivedAt,
-			Price:        price,
-			Notional:     notional,
-			TickRule:     tickRule,
+			Timestamp:    time.UnixMilli(update.TimestampMillis).UTC(),
+			ReceivedAt:   update.ReceivedAt,
+			Price:        update.Price,
+			Notional:     update.Notional,
+			TickRule:     update.TickRule,
 			IsSequential: hadPrevID && tradeID > prevID,
-		}),
-	}, nil
+		}))
+	}
+	b.pendingOrder[symbol] = order
+	return trades
 }
 
 func (b *Bitfinex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
