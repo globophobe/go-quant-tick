@@ -64,7 +64,7 @@ func TestWebSocketDataBufferFlushesPreviousMinuteOnLaterTradeEvent(t *testing.T)
 	if len(row.aggregatedTrades) != 1 || row.aggregatedTrades[0].UID != "aggregated-1" {
 		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
 	}
-	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
+	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "aggregated-1" {
 		t.Fatalf("filtered trades = %#v", row.filteredTrades)
 	}
 }
@@ -256,6 +256,61 @@ func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 	}
 	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
 		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+}
+
+func TestWebSocketDataStoreDerivesFilteredTradesFromMergedAggregatedTrades(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	existing := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		AggregatedTrades: []TradeEvent{
+			testTrade(
+				"aggregated-1",
+				timestamp.Add(10*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+				withNotional("1"),
+			),
+		},
+		FilteredTrades: []SignificantTrade{testSignificantTrade("stale-filtered", timestamp.Add(10*time.Second))},
+	}
+	incoming := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		AggregatedTrades: []TradeEvent{
+			testTrade(
+				"aggregated-2",
+				timestamp.Add(20*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+				withNotional("10"),
+			),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{existing}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{incoming}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.aggregatedTrades) != 2 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if len(row.filteredTrades) != 1 {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].UID != "aggregated-2" {
+		t.Fatalf("filtered trades should be re-derived from aggregated trades: %#v", row.filteredTrades)
 	}
 }
 

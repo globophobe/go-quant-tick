@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
 
 func TestBitmexSubscriptionMessages(t *testing.T) {
@@ -97,6 +99,60 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 	}
 }
 
+func TestBitmexParsesPartialTradeSnapshotChronologically(t *testing.T) {
+	exchange := NewBitmex([]string{"XBTUSD"})
+	trades, err := exchange.ParseTradeMessage(
+		[]byte(`{
+			"table": "trade",
+			"action": "partial",
+			"data": [
+				{
+					"trdMatchID": "later",
+					"symbol": "XBTUSD",
+					"timestamp": "2026-04-08T00:00:02.000Z",
+					"side": "Buy",
+					"price": 100.0,
+					"homeNotional": "1"
+				},
+				{
+					"trdMatchID": "earlier",
+					"symbol": "XBTUSD",
+					"timestamp": "2026-04-08T00:00:01.000Z",
+					"side": "Sell",
+					"price": 100.0,
+					"homeNotional": "1"
+				}
+			]
+		}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStrings(t, tradeUIDs(trades), []string{"earlier", "later"})
+}
+
+func TestBitmexSeenTradesDeduplicatesWithinLimit(t *testing.T) {
+	seen := newBitmexSeenTrades(2)
+	timestamp := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+	first := bitmexTestTrade("first", timestamp)
+	second := bitmexTestTrade("second", timestamp.Add(time.Second))
+	third := bitmexTestTrade("third", timestamp.Add(2*time.Second))
+
+	if !seen.Add(first) {
+		t.Fatal("first trade should be new")
+	}
+	if seen.Add(first) {
+		t.Fatal("duplicate first trade should be rejected")
+	}
+	if !seen.Add(second) || !seen.Add(third) {
+		t.Fatal("second and third trades should be new")
+	}
+	if !seen.Add(first) {
+		t.Fatal("first trade should be accepted after it leaves the bounded cache")
+	}
+}
+
 func TestBitmexSpotSymbolParseTradeMessages(t *testing.T) {
 	exchange := NewBitmex([]string{"XBT_USDT"})
 	trades, err := exchange.ParseTradeMessage(
@@ -164,4 +220,18 @@ func TestBitmexParsesStringPrice(t *testing.T) {
 	assertDecimals(t, tradePrices(trades), []string{"100.0"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1.5"})
 	assertDecimals(t, tradeVolumes(trades), []string{"150.00"})
+}
+
+func bitmexTestTrade(uid string, timestamp time.Time) quanttick.TradeEvent {
+	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
+		Exchange:     BitmexName,
+		UID:          uid,
+		Symbol:       "XBTUSD",
+		Timestamp:    timestamp,
+		ReceivedAt:   timestamp,
+		Price:        quanttick.MustDecimal("100"),
+		Notional:     quanttick.MustDecimal("1"),
+		TickRule:     1,
+		IsSequential: true,
+	})
 }

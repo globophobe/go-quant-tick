@@ -264,6 +264,10 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 		if err != nil {
 			return err
 		}
+		bucket, err = deriveFilteredTradesFromAggregated(bucket)
+		if err != nil {
+			return err
+		}
 		rawTrades, err := marshalJSONList(bucket.RawTrades)
 		if err != nil {
 			return fmt.Errorf("marshal raw trades: %w", err)
@@ -333,6 +337,30 @@ func mergeExistingWebSocketDataBucket(ctx context.Context, tx *sql.Tx, bucket We
 	bucket.RawTrades = mergeTradesByUID(rawTrades, bucket.RawTrades)
 	bucket.AggregatedTrades = mergeTradesByUID(aggregatedTrades, bucket.AggregatedTrades)
 	bucket.FilteredTrades = mergeSignificantTradesByUID(filteredTrades, bucket.FilteredTrades)
+	return bucket, nil
+}
+
+func deriveFilteredTradesFromAggregated(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	if len(bucket.AggregatedTrades) == 0 {
+		return bucket, nil
+	}
+
+	threshold := decimal.NewFromInt(bucket.SignificantTradeFilter)
+	aggregator := NewSignificantTradeAggregator(threshold, time.Minute)
+	filteredTrades := make([]SignificantTrade, 0, len(bucket.AggregatedTrades))
+	key := ExchangeSymbolKey(bucket.Exchange, bucket.APISymbol)
+	for _, trade := range bucket.AggregatedTrades {
+		trades, err := aggregator.Add(trade)
+		if err != nil {
+			return WebSocketDataBucket{}, fmt.Errorf("derive filtered trades for %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+		}
+		filteredTrades = append(filteredTrades, trades...)
+	}
+	trades, err := aggregator.Flush(key)
+	if err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("flush derived filtered trades for %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+	}
+	bucket.FilteredTrades = append(filteredTrades, trades...)
 	return bucket, nil
 }
 

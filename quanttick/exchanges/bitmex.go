@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	BitmexName = "bitmex"
-	BitmexURL  = "wss://ws.bitmex.com/realtime"
+	BitmexName           = "bitmex"
+	BitmexURL            = "wss://ws.bitmex.com/realtime"
+	bitmexSeenTradeLimit = 10000
 )
 
 var _ quanttick.Exchange = (*Bitmex)(nil)
@@ -60,13 +62,14 @@ func (b *Bitmex) Name() string {
 func (b *Bitmex) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-chan error) {
 	trades := make(chan quanttick.TradeEvent)
 	errs := make(chan error, 1)
+	seen := newBitmexSeenTrades(bitmexSeenTradeLimit)
 
 	go func() {
 		defer close(trades)
 		defer close(errs)
 
 		for {
-			if err := b.run(ctx, trades); err != nil {
+			if err := b.run(ctx, trades, seen); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
@@ -101,7 +104,7 @@ func (b *Bitmex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quantti
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("parse bitmex message: %w", err)
 	}
-	if msg.Table != "trade" || msg.Action != "insert" {
+	if msg.Table != "trade" || (msg.Action != "insert" && msg.Action != "partial") {
 		return nil, nil
 	}
 
@@ -141,10 +144,18 @@ func (b *Bitmex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quantti
 		}))
 	}
 
+	if msg.Action == "partial" {
+		sort.SliceStable(trades, func(i, j int) bool {
+			if trades[i].Timestamp.Equal(trades[j].Timestamp) {
+				return trades[i].Nanoseconds < trades[j].Nanoseconds
+			}
+			return trades[i].Timestamp.Before(trades[j].Timestamp)
+		})
+	}
 	return trades, nil
 }
 
-func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
+func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent, seen *bitmexSeenTrades) error {
 	conn, _, err := websocket.Dial(ctx, b.URL, nil)
 	if err != nil {
 		return fmt.Errorf("dial bitmex websocket: %w", err)
@@ -179,6 +190,9 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) er
 			return err
 		}
 		for _, trade := range parsedTrades {
+			if !seen.Add(trade) {
+				continue
+			}
 			select {
 			case trades <- trade:
 			case <-ctx.Done():
@@ -202,6 +216,34 @@ type bitmexTradeEntry struct {
 	Price           json.RawMessage `json:"price"`
 	HomeNotional    json.RawMessage `json:"homeNotional"`
 	ForeignNotional json.RawMessage `json:"foreignNotional"`
+}
+
+type bitmexSeenTrades struct {
+	limit int
+	seen  map[string]struct{}
+	order []string
+}
+
+func newBitmexSeenTrades(limit int) *bitmexSeenTrades {
+	return &bitmexSeenTrades{
+		limit: limit,
+		seen:  make(map[string]struct{}),
+	}
+}
+
+func (s *bitmexSeenTrades) Add(trade quanttick.TradeEvent) bool {
+	key := trade.Symbol + "|" + trade.UID
+	if _, ok := s.seen[key]; ok {
+		return false
+	}
+	s.seen[key] = struct{}{}
+	s.order = append(s.order, key)
+	for s.limit > 0 && len(s.order) > s.limit {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		delete(s.seen, oldest)
+	}
+	return true
 }
 
 func parseBitmexNotional(rawTrade bitmexTradeEntry, price quanttick.Decimal) (quanttick.Decimal, error) {
