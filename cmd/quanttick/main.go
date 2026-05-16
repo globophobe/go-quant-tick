@@ -67,6 +67,9 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			if err := pipeline.Handle(ctx, trade); err != nil {
 				return err
 			}
+			if err := pipeline.FlushBefore(ctx, trade.Exchange, trade.Symbol, trade.Timestamp); err != nil {
+				return err
+			}
 			_, err := eventFlusher.FlushBefore(ctx, trade.Exchange, trade.Symbol, trade.Timestamp)
 			return err
 		}
