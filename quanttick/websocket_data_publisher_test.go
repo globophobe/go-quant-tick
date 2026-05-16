@@ -303,6 +303,312 @@ func TestWebSocketDataStoreDerivesFilteredTradesFromAggregatedBucket(t *testing.
 	assertDecimal(t, contextRow.TotalNotional, "5")
 }
 
+func TestWebSocketDataStoreDerivesBitfinexDerivativeTradesByUID(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	bucket := WebSocketDataBucket{
+		Exchange:               "bitfinex",
+		APISymbol:              "tBTCF0:USTF0",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"102",
+				timestamp.Add(20*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCF0:USTF0"),
+				withPrice("100"),
+				withNotional("12"),
+			),
+			testTrade(
+				"101",
+				timestamp.Add(10*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCF0:USTF0"),
+				withPrice("101"),
+				withNotional("2"),
+			),
+			testTrade(
+				"100",
+				timestamp.Add(10*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCF0:USTF0"),
+				withPrice("100"),
+				withNotional("1"),
+			),
+			testTrade(
+				"103",
+				timestamp.Add(30*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCF0:USTF0"),
+				withPrice("99"),
+				withNotional("3"),
+			),
+		},
+		AggregatedTrades: []TradeEvent{
+			testTrade("stale-aggregated", timestamp, withExchange("bitfinex"), withSymbol("tBTCF0:USTF0")),
+		},
+		FilteredTrades: []SignificantTrade{
+			testSignificantTrade("stale-filtered", timestamp),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{bucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.rawTrades) != 4 || row.rawTrades[0].UID != "100" {
+		t.Fatalf("raw trades should be canonicalized by Bitfinex UID order: %#v", row.rawTrades)
+	}
+	if len(row.aggregatedTrades) != 3 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if row.aggregatedTrades[0].UID != "100" || row.aggregatedTrades[1].UID != "102" || row.aggregatedTrades[2].UID != "103" {
+		t.Fatalf("aggregated trades should be rebuilt from Bitfinex UID order: %#v", row.aggregatedTrades)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Price, "101")
+	assertDecimal(t, row.aggregatedTrades[0].Volume, "302")
+	if row.aggregatedTrades[0].Ticks != 2 {
+		t.Fatalf("first aggregate ticks = %d, want 2", row.aggregatedTrades[0].Ticks)
+	}
+
+	if len(row.filteredTrades) != 2 {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].UID != "102" {
+		t.Fatalf("filtered trades should be derived from rebuilt aggregated trades: %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].Volume == nil {
+		t.Fatalf("significant filtered trade volume = nil, want value")
+	}
+	assertDecimal(t, *row.filteredTrades[0].Volume, "1200")
+	assertDecimal(t, row.filteredTrades[0].TotalVolume, "1502")
+	if row.filteredTrades[1].UID != "103" {
+		t.Fatalf("context filtered uid = %s, want 103", row.filteredTrades[1].UID)
+	}
+	assertDecimal(t, row.filteredTrades[1].TotalVolume, "297")
+}
+
+func TestWebSocketDataStoreDerivesBitfinexSpotTradesFromRaw(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	bucket := WebSocketDataBucket{
+		Exchange:               "bitfinex",
+		APISymbol:              "tBTCUSD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"102",
+				timestamp.Add(20*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("100"),
+				withNotional("12"),
+			),
+			testTrade(
+				"101",
+				timestamp.Add(10*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("101"),
+				withNotional("2"),
+			),
+			testTrade(
+				"100",
+				timestamp.Add(10*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("100"),
+				withNotional("1"),
+			),
+			testTrade(
+				"103",
+				timestamp.Add(30*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("99"),
+				withNotional("3"),
+			),
+		},
+		AggregatedTrades: []TradeEvent{
+			testTrade(
+				"spot-aggregated",
+				timestamp.Add(10*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("105"),
+				withNotional("12"),
+			),
+		},
+		FilteredTrades: []SignificantTrade{
+			testSignificantTrade("stale-filtered", timestamp),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{bucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.rawTrades) != 4 || row.rawTrades[0].UID != "100" || row.rawTrades[1].UID != "101" {
+		t.Fatalf("spot raw trades should be canonicalized by Bitfinex UID order: %#v", row.rawTrades)
+	}
+	if len(row.aggregatedTrades) != 3 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if row.aggregatedTrades[0].UID != "100" || row.aggregatedTrades[1].UID != "102" || row.aggregatedTrades[2].UID != "103" {
+		t.Fatalf("spot aggregated trades should be rebuilt from canonical raw order: %#v", row.aggregatedTrades)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Price, "101")
+	assertDecimal(t, row.aggregatedTrades[0].Volume, "302")
+	if row.aggregatedTrades[0].Ticks != 2 {
+		t.Fatalf("first aggregate ticks = %d, want 2", row.aggregatedTrades[0].Ticks)
+	}
+	assertDecimal(t, row.aggregatedTrades[1].Price, "100")
+	assertDecimal(t, row.aggregatedTrades[1].Volume, "1200")
+	assertDecimal(t, row.aggregatedTrades[2].Price, "99")
+	assertDecimal(t, row.aggregatedTrades[2].Volume, "297")
+
+	if len(row.filteredTrades) != 2 {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].UID != "102" {
+		t.Fatalf("filtered trades should be derived from rebuilt spot aggregated trades: %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].Volume == nil {
+		t.Fatalf("significant filtered trade volume = nil, want value")
+	}
+	assertDecimal(t, *row.filteredTrades[0].Volume, "1200")
+	assertDecimal(t, row.filteredTrades[0].TotalVolume, "1502")
+	if row.filteredTrades[1].UID != "103" {
+		t.Fatalf("context filtered uid = %s, want 103", row.filteredTrades[1].UID)
+	}
+	assertDecimal(t, row.filteredTrades[1].TotalVolume, "297")
+}
+
+func TestWebSocketDataStoreDerivesBitfinexSpotExactTiesByUID(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	bucket := WebSocketDataBucket{
+		Exchange:               "bitfinex",
+		APISymbol:              "tBTCUSD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"1919344204",
+				timestamp.Add(17*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("78161"),
+				withNotional("0.0002"),
+				withTickRule(-1),
+			),
+			testTrade(
+				"1919344205",
+				timestamp.Add(17*time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("78162"),
+				withNotional("0.064"),
+				withTickRule(-1),
+			),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{bucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.rawTrades) != 2 || row.rawTrades[0].UID != "1919344204" || row.rawTrades[1].UID != "1919344205" {
+		t.Fatalf("spot exact timestamp ties should be sorted by UID: %#v", row.rawTrades)
+	}
+	if len(row.aggregatedTrades) != 1 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if row.aggregatedTrades[0].UID != "1919344204" {
+		t.Fatalf("aggregate uid = %s, want first trade uid", row.aggregatedTrades[0].UID)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Price, "78162")
+	assertDecimal(t, row.aggregatedTrades[0].Notional, "0.0642")
+	if row.aggregatedTrades[0].Ticks != 2 {
+		t.Fatalf("aggregate ticks = %d, want 2", row.aggregatedTrades[0].Ticks)
+	}
+}
+
+func TestWebSocketDataStorePreservesBitfinexSpotUIDOrderAcrossMerge(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	firstBucket := WebSocketDataBucket{
+		Exchange:               "bitfinex",
+		APISymbol:              "tBTCUSD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"1919360086",
+				timestamp.Add(2*time.Second+754*time.Millisecond),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("78076"),
+				withNotional("0.0002"),
+			),
+			testTrade(
+				"1919360087",
+				timestamp.Add(2*time.Second+754*time.Millisecond),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("78078"),
+				withNotional("0.00004175"),
+			),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{firstBucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	secondBucket := WebSocketDataBucket{
+		Exchange:               "bitfinex",
+		APISymbol:              "tBTCUSD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			testTrade(
+				"1919360090",
+				timestamp.Add(2*time.Second+757*time.Millisecond),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("78079"),
+				withNotional("0.00503741"),
+			),
+		},
+	}
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{secondBucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.rawTrades) != 3 || row.rawTrades[0].UID != "1919360086" || row.rawTrades[1].UID != "1919360087" {
+		t.Fatalf("spot UID order should survive bucket merge: %#v", row.rawTrades)
+	}
+	if len(row.aggregatedTrades) != 2 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if row.aggregatedTrades[0].UID != "1919360086" {
+		t.Fatalf("aggregate uid = %s, want first persisted tie uid", row.aggregatedTrades[0].UID)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Price, "78078")
+	assertDecimal(t, row.aggregatedTrades[0].Volume, "18.87495650")
+}
+
 func TestWebSocketDataStoreDeletesRowsOlderThanRetention(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	store := NewWebSocketDataStore(db)

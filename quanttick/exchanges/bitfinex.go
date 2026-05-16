@@ -182,6 +182,8 @@ func (b *Bitfinex) parseArrayMessage(data []byte, receivedAt time.Time) ([]quant
 		return nil, nil
 	}
 
+	// Bitfinex sends "te" first and "tu" as the final update. Use "te" only to
+	// preserve exchange stream order; emit the final trade from the matching "tu".
 	if tag == "te" {
 		b.enqueueBitfinexTrade(symbol, update.TradeID)
 	} else {
@@ -250,10 +252,10 @@ func (b *Bitfinex) ensureBitfinexTradeState(symbol string) {
 }
 
 func (b *Bitfinex) enqueueBitfinexTrade(symbol string, tradeID int64) {
+	b.ensureBitfinexTradeState(symbol)
 	if lastID, ok := b.lastIDs[symbol]; ok && tradeID <= lastID {
 		return
 	}
-	b.ensureBitfinexTradeState(symbol)
 	if _, ok := b.pendingOrderID[symbol][tradeID]; ok {
 		return
 	}
@@ -262,10 +264,10 @@ func (b *Bitfinex) enqueueBitfinexTrade(symbol string, tradeID int64) {
 }
 
 func (b *Bitfinex) storeBitfinexTradeUpdate(symbol string, update bitfinexTradeUpdate) {
+	b.ensureBitfinexTradeState(symbol)
 	if lastID, ok := b.lastIDs[symbol]; ok && update.TradeID <= lastID {
 		return
 	}
-	b.ensureBitfinexTradeState(symbol)
 	b.pendingUpdates[symbol][update.TradeID] = update
 }
 
@@ -285,20 +287,24 @@ func (b *Bitfinex) emitReadyBitfinexTrades(symbol string) []quanttick.TradeEvent
 
 		prevID, hadPrevID := b.lastIDs[symbol]
 		b.lastIDs[symbol] = tradeID
-		trades = append(trades, quanttick.NewTradeEvent(quanttick.TradeEventInput{
-			Exchange:     BitfinexName,
-			UID:          strconv.FormatInt(tradeID, 10),
-			Symbol:       symbol,
-			Timestamp:    time.UnixMilli(update.TimestampMillis).UTC(),
-			ReceivedAt:   update.ReceivedAt,
-			Price:        update.Price,
-			Notional:     update.Notional,
-			TickRule:     update.TickRule,
-			IsSequential: hadPrevID && tradeID > prevID,
-		}))
+		trades = append(trades, newBitfinexTradeEvent(symbol, update, hadPrevID && tradeID > prevID))
 	}
 	b.pendingOrder[symbol] = order
 	return trades
+}
+
+func newBitfinexTradeEvent(symbol string, update bitfinexTradeUpdate, isSequential bool) quanttick.TradeEvent {
+	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
+		Exchange:     BitfinexName,
+		UID:          strconv.FormatInt(update.TradeID, 10),
+		Symbol:       symbol,
+		Timestamp:    time.UnixMilli(update.TimestampMillis).UTC(),
+		ReceivedAt:   update.ReceivedAt,
+		Price:        update.Price,
+		Notional:     update.Notional,
+		TickRule:     update.TickRule,
+		IsSequential: isSequential,
+	})
 }
 
 func (b *Bitfinex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {

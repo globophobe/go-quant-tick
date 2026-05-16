@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -223,7 +224,7 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 		if err != nil {
 			return err
 		}
-		bucket, err = deriveFilteredTradesFromAggregated(bucket)
+		bucket, err = deriveWebSocketDataBucket(bucket)
 		if err != nil {
 			return err
 		}
@@ -293,6 +294,74 @@ func mergeExistingWebSocketDataBucket(ctx context.Context, tx *sql.Tx, bucket We
 	bucket.AggregatedTrades = mergeTradesByUID(aggregatedTrades, bucket.AggregatedTrades)
 	bucket.FilteredTrades = nil
 	return bucket, nil
+}
+
+func deriveWebSocketDataBucket(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	if shouldDeriveBitfinexTradesFromRaw(bucket) {
+		bucket.RawTrades = sortBitfinexRawTrades(bucket.APISymbol, bucket.RawTrades)
+		aggregatedTrades, err := aggregateTradeEvents(bucket.RawTrades)
+		if err != nil {
+			return WebSocketDataBucket{}, fmt.Errorf("derive bitfinex aggregated trades for %s %s: %w", bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+		}
+		bucket.AggregatedTrades = aggregatedTrades
+	}
+	return deriveFilteredTradesFromAggregated(bucket)
+}
+
+func shouldDeriveBitfinexTradesFromRaw(bucket WebSocketDataBucket) bool {
+	return bucket.Exchange == "bitfinex" && len(bucket.RawTrades) > 0
+}
+
+// Bitfinex spot REST display order is not fully inferable from the websocket
+// payload or receive order. Use the same deterministic UID order for spot and
+// derivatives so derived websocket buckets are internally consistent, even if
+// spot cannot always match REST display order exactly.
+func sortBitfinexRawTrades(_ string, rawTrades []TradeEvent) []TradeEvent {
+	return sortBitfinexRawTradesByUID(rawTrades)
+}
+
+func sortBitfinexRawTradesByUID(rawTrades []TradeEvent) []TradeEvent {
+	trades := append([]TradeEvent(nil), rawTrades...)
+	sort.SliceStable(trades, func(i, j int) bool {
+		return bitfinexUIDLess(trades[i].UID, trades[j].UID)
+	})
+	return trades
+}
+
+func bitfinexUIDLess(left string, right string) bool {
+	leftID, leftErr := strconv.ParseInt(left, 10, 64)
+	rightID, rightErr := strconv.ParseInt(right, 10, 64)
+	if leftErr != nil || rightErr != nil {
+		return left < right
+	}
+	return leftID < rightID
+}
+
+func aggregateTradeEvents(trades []TradeEvent) ([]TradeEvent, error) {
+	if len(trades) == 0 {
+		return nil, nil
+	}
+
+	aggregatedTrades := make([]TradeEvent, 0, len(trades))
+	start := 0
+	for index := 1; index < len(trades); index++ {
+		if sameSample(trades[start], trades[index]) {
+			continue
+		}
+		aggregated, err := aggregateTrades(trades[start:index])
+		if err != nil {
+			return nil, err
+		}
+		aggregatedTrades = append(aggregatedTrades, aggregated)
+		start = index
+	}
+
+	aggregated, err := aggregateTrades(trades[start:])
+	if err != nil {
+		return nil, err
+	}
+	aggregatedTrades = append(aggregatedTrades, aggregated)
+	return aggregatedTrades, nil
 }
 
 func deriveFilteredTradesFromAggregated(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
