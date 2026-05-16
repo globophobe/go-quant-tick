@@ -58,7 +58,8 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 					"timestamp": "2026-04-08T00:00:00.123456789Z",
 					"side": "Buy",
 					"price": 100.0,
-					"homeNotional": "1.5"
+					"homeNotional": "1.499999",
+					"foreignNotional": "150.0"
 				},
 				{
 					"trdMatchID": "b",
@@ -83,7 +84,7 @@ func TestBitmexParseTradeMessages(t *testing.T) {
 	assertInts(t, tradeNanoseconds(trades), []int{789, 0})
 	assertDecimals(t, tradePrices(trades), []string{"100.0", "200.0"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1.5", "2"})
-	assertDecimals(t, tradeVolumes(trades), []string{"150.00", "400.0"})
+	assertDecimals(t, tradeVolumes(trades), []string{"150.0", "400.0"})
 
 	wantTimes := []time.Time{
 		time.Date(2026, 4, 8, 0, 0, 0, 123456000, time.UTC),
@@ -194,7 +195,36 @@ func TestBitmexParseIgnoresNonTradeMessages(t *testing.T) {
 	}
 }
 
-func TestBitmexParsesStringPrice(t *testing.T) {
+func TestBitmexParsesStringNumericFields(t *testing.T) {
+	exchange := NewBitmex([]string{"XBTUSD"})
+
+	trades, err := exchange.ParseTradeMessage(
+		[]byte(`{
+			"table": "trade",
+			"action": "insert",
+			"data": [
+				{
+					"trdMatchID": "a",
+					"symbol": "XBTUSD",
+					"timestamp": "2026-04-08T00:00:00.000Z",
+					"side": "Buy",
+					"price": "100.0",
+					"homeNotional": 1.499999,
+					"foreignNotional": 150.0
+				}
+			]
+		}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDecimals(t, tradePrices(trades), []string{"100.0"})
+	assertDecimals(t, tradeNotionals(trades), []string{"1.5"})
+	assertDecimals(t, tradeVolumes(trades), []string{"150.0"})
+}
+
+func TestBitmexFallsBackToHomeNotionalWhenForeignNotionalIsMissing(t *testing.T) {
 	exchange := NewBitmex([]string{"XBTUSD"})
 
 	trades, err := exchange.ParseTradeMessage(
@@ -217,7 +247,6 @@ func TestBitmexParsesStringPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDecimals(t, tradePrices(trades), []string{"100.0"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1.5"})
 	assertDecimals(t, tradeVolumes(trades), []string{"150.00"})
 }

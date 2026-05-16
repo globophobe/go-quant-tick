@@ -29,15 +29,11 @@ func TestWebSocketDataBufferFlushesPreviousMinuteOnLaterTradeEvent(t *testing.T)
 		withExchange("coinbase"),
 		withSymbol("BTC-USD"),
 	)
-	filtered := testSignificantTrade("filtered-1", timestamp.Add(30*time.Second))
 
 	if err := buffer.RawPublisher().Publish(context.Background(), raw); err != nil {
 		t.Fatal(err)
 	}
 	if err := buffer.AggregatedPublisher().Publish(context.Background(), aggregated); err != nil {
-		t.Fatal(err)
-	}
-	if err := buffer.SignificantPublisher().Publish(context.Background(), filtered); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,58 +161,6 @@ func TestWebSocketDataBufferUsesSymbolThreshold(t *testing.T) {
 	}
 }
 
-func TestWebSocketDataBufferKeepsSameMinuteEventsInSameBucketBeforeNextMinute(t *testing.T) {
-	db := newWebSocketDataTestDB(t)
-	buffer := NewWebSocketDataBuffer(
-		NewWebSocketDataStore(db),
-		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
-	)
-	timestamp := time.Now().UTC().Truncate(time.Minute)
-	filtered := testSignificantTrade("filtered-1", timestamp.Add(10*time.Second))
-
-	if err := buffer.SignificantPublisher().Publish(context.Background(), filtered); err != nil {
-		t.Fatal(err)
-	}
-	count, err := buffer.FlushBefore(
-		context.Background(),
-		"coinbase",
-		"BTC-USD",
-		timestamp.Add(30*time.Second),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("flushed buckets = %d, want 0", count)
-	}
-
-	raw := testTrade(
-		"raw-1",
-		timestamp.Add(20*time.Second),
-		withExchange("coinbase"),
-		withSymbol("BTC-USD"),
-	)
-	if err := buffer.RawPublisher().Publish(context.Background(), raw); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := buffer.FlushBefore(
-		context.Background(),
-		"coinbase",
-		"BTC-USD",
-		timestamp.Add(time.Minute),
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	row := getWebSocketDataTestRow(t, db)
-	if len(row.rawTrades) != 1 || row.rawTrades[0].UID != "raw-1" {
-		t.Fatalf("raw trades = %#v", row.rawTrades)
-	}
-	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
-		t.Fatalf("filtered trades = %#v", row.filteredTrades)
-	}
-}
-
 func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	store := NewWebSocketDataStore(db)
@@ -226,7 +170,14 @@ func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 		APISymbol:              "BTC-USD",
 		SignificantTradeFilter: 1000,
 		Timestamp:              timestamp,
-		FilteredTrades:         []SignificantTrade{testSignificantTrade("filtered-1", timestamp.Add(10*time.Second))},
+		RawTrades: []TradeEvent{
+			testTrade(
+				"raw-existing",
+				timestamp.Add(10*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+			),
+		},
 	}
 	incoming := WebSocketDataBucket{
 		Exchange:               "coinbase",
@@ -235,7 +186,7 @@ func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 		Timestamp:              timestamp,
 		RawTrades: []TradeEvent{
 			testTrade(
-				"raw-1",
+				"raw-incoming",
 				timestamp.Add(20*time.Second),
 				withExchange("coinbase"),
 				withSymbol("BTC-USD"),
@@ -251,15 +202,18 @@ func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 	}
 
 	row := getWebSocketDataTestRow(t, db)
-	if len(row.rawTrades) != 1 || row.rawTrades[0].UID != "raw-1" {
+	if len(row.rawTrades) != 2 {
 		t.Fatalf("raw trades = %#v", row.rawTrades)
 	}
-	if len(row.filteredTrades) != 1 || row.filteredTrades[0].UID != "filtered-1" {
+	if row.rawTrades[0].UID != "raw-existing" || row.rawTrades[1].UID != "raw-incoming" {
+		t.Fatalf("raw trades = %#v", row.rawTrades)
+	}
+	if len(row.filteredTrades) != 0 {
 		t.Fatalf("filtered trades = %#v", row.filteredTrades)
 	}
 }
 
-func TestWebSocketDataStoreDerivesFilteredTradesFromMergedAggregatedTrades(t *testing.T) {
+func TestWebSocketDataStoreDerivesFilteredTradesFromAggregatedBucket(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	store := NewWebSocketDataStore(db)
 	timestamp := time.Now().UTC().Truncate(time.Minute)
@@ -270,10 +224,11 @@ func TestWebSocketDataStoreDerivesFilteredTradesFromMergedAggregatedTrades(t *te
 		Timestamp:              timestamp,
 		AggregatedTrades: []TradeEvent{
 			testTrade(
-				"aggregated-1",
+				"context-before",
 				timestamp.Add(10*time.Second),
 				withExchange("coinbase"),
 				withSymbol("BTC-USD"),
+				withPrice("100"),
 				withNotional("1"),
 			),
 		},
@@ -286,11 +241,28 @@ func TestWebSocketDataStoreDerivesFilteredTradesFromMergedAggregatedTrades(t *te
 		Timestamp:              timestamp,
 		AggregatedTrades: []TradeEvent{
 			testTrade(
-				"aggregated-2",
+				"significant",
 				timestamp.Add(20*time.Second),
 				withExchange("coinbase"),
 				withSymbol("BTC-USD"),
-				withNotional("10"),
+				withPrice("100"),
+				withNotional("12"),
+			),
+			testTrade(
+				"context-1",
+				timestamp.Add(30*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+				withPrice("101"),
+				withNotional("2"),
+			),
+			testTrade(
+				"context-2",
+				timestamp.Add(40*time.Second),
+				withExchange("coinbase"),
+				withSymbol("BTC-USD"),
+				withPrice("99"),
+				withNotional("3"),
 			),
 		},
 	}
@@ -303,15 +275,32 @@ func TestWebSocketDataStoreDerivesFilteredTradesFromMergedAggregatedTrades(t *te
 	}
 
 	row := getWebSocketDataTestRow(t, db)
-	if len(row.aggregatedTrades) != 2 {
+	if len(row.aggregatedTrades) != 4 {
 		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
 	}
-	if len(row.filteredTrades) != 1 {
+	if len(row.filteredTrades) != 2 {
 		t.Fatalf("filtered trades = %#v", row.filteredTrades)
 	}
-	if row.filteredTrades[0].UID != "aggregated-2" {
+	if row.filteredTrades[0].UID != "significant" {
 		t.Fatalf("filtered trades should be re-derived from aggregated trades: %#v", row.filteredTrades)
 	}
+	if row.filteredTrades[0].Volume == nil {
+		t.Fatalf("significant filtered trade volume = nil, want value")
+	}
+	assertDecimal(t, *row.filteredTrades[0].Volume, "1200")
+	assertDecimal(t, row.filteredTrades[0].TotalVolume, "1300")
+
+	contextRow := row.filteredTrades[1]
+	if contextRow.UID != "context-2" {
+		t.Fatalf("context row uid = %s, want context-2", contextRow.UID)
+	}
+	if contextRow.Volume != nil || contextRow.Notional != nil || contextRow.TickRule != nil || contextRow.Ticks != nil {
+		t.Fatalf("context row should not have per-trade fields: %#v", contextRow)
+	}
+	assertDecimal(t, contextRow.High, "101")
+	assertDecimal(t, contextRow.Low, "99")
+	assertDecimal(t, contextRow.TotalVolume, "499")
+	assertDecimal(t, contextRow.TotalNotional, "5")
 }
 
 func TestWebSocketDataStoreDeletesRowsOlderThanRetention(t *testing.T) {
