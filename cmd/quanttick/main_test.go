@@ -116,10 +116,10 @@ func TestNewPipelineFromEnvDefaultsToDatabase(t *testing.T) {
 }
 
 func TestCloudSQLInstanceConnectionNameStripsSocketPrefix(t *testing.T) {
-	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:dqt")
+	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:database")
 
-	if got := cloudSQLInstanceConnectionName(); got != "project:region:dqt" {
-		t.Fatalf("instance connection name = %s, want project:region:dqt", got)
+	if got := cloudSQLInstanceConnectionName(); got != "project:region:database" {
+		t.Fatalf("instance connection name = %s, want project:region:database", got)
 	}
 }
 
