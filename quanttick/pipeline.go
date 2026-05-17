@@ -117,50 +117,55 @@ func (p *TradePipeline) Flush(ctx context.Context) error {
 	return p.flushSignificantTrades(ctx)
 }
 
-func (p *TradePipeline) FlushDue(ctx context.Context, now time.Time) error {
+func (p *TradePipeline) FlushBefore(ctx context.Context, exchange string, symbol string, timestamp time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.significantAggregator == nil || p.significantAggregator.windowDuration <= 0 {
-		return nil
-	}
-	if err := p.flushAggregatedTrades(ctx); err != nil {
+	boundary := timestamp.UTC().Truncate(time.Minute)
+	key := ExchangeSymbolKey(exchange, symbol)
+	if err := p.flushAggregatedTradeKeyBefore(ctx, key, boundary); err != nil {
 		return err
 	}
-	for _, key := range p.significantAggregator.DueKeys(now) {
-		significantTrades, err := p.significantAggregator.Flush(key)
-		if err != nil {
-			return fmt.Errorf("flush due significant trades: %w", err)
-		}
-		if err := p.publishSignificantTrades(ctx, significantTrades); err != nil {
+	return p.flushSignificantTradeKeyBefore(ctx, key, boundary)
+}
+
+func (p *TradePipeline) flushAggregatedTrades(ctx context.Context) error {
+	if p.tradeAggregator == nil {
+		return nil
+	}
+	for _, key := range pendingKeys(p.tradeAggregator.trades) {
+		if err := p.flushAggregatedTradeKey(ctx, key); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (p *TradePipeline) flushAggregatedTrades(ctx context.Context) error {
-	if p.tradeAggregator != nil {
-		for _, key := range pendingKeys(p.tradeAggregator.trades) {
-			aggregatedTrades, err := p.tradeAggregator.Flush(key)
-			if err != nil {
-				return fmt.Errorf("flush aggregated trades: %w", err)
+func (p *TradePipeline) flushAggregatedTradeKeyBefore(ctx context.Context, key string, boundary time.Time) error {
+	if p.tradeAggregator == nil || !hasPendingTradesBefore(p.tradeAggregator.trades, key, boundary) {
+		return nil
+	}
+	return p.flushAggregatedTradeKey(ctx, key)
+}
+
+func (p *TradePipeline) flushAggregatedTradeKey(ctx context.Context, key string) error {
+	aggregatedTrades, err := p.tradeAggregator.Flush(key)
+	if err != nil {
+		return fmt.Errorf("flush aggregated trades: %w", err)
+	}
+	for _, aggregatedTrade := range aggregatedTrades {
+		if p.AggregatedPublisher != nil {
+			if err := p.AggregatedPublisher.Publish(ctx, aggregatedTrade); err != nil {
+				return fmt.Errorf("publish flushed aggregated trade: %w", err)
 			}
-			for _, aggregatedTrade := range aggregatedTrades {
-				if p.AggregatedPublisher != nil {
-					if err := p.AggregatedPublisher.Publish(ctx, aggregatedTrade); err != nil {
-						return fmt.Errorf("publish flushed aggregated trade: %w", err)
-					}
-				}
-				if p.significantAggregator != nil {
-					significantTrades, err := p.significantAggregator.Add(aggregatedTrade)
-					if err != nil {
-						return fmt.Errorf("aggregate flushed significant trade: %w", err)
-					}
-					if err := p.publishSignificantTrades(ctx, significantTrades); err != nil {
-						return err
-					}
-				}
+		}
+		if p.significantAggregator != nil {
+			significantTrades, err := p.significantAggregator.Add(aggregatedTrade)
+			if err != nil {
+				return fmt.Errorf("aggregate flushed significant trade: %w", err)
+			}
+			if err := p.publishSignificantTrades(ctx, significantTrades); err != nil {
+				return err
 			}
 		}
 	}
@@ -168,73 +173,30 @@ func (p *TradePipeline) flushAggregatedTrades(ctx context.Context) error {
 }
 
 func (p *TradePipeline) flushSignificantTrades(ctx context.Context) error {
-	if p.significantAggregator != nil {
-		for _, key := range pendingKeys(p.significantAggregator.trades) {
-			significantTrades, err := p.significantAggregator.Flush(key)
-			if err != nil {
-				return fmt.Errorf("flush significant trades: %w", err)
-			}
-			if err := p.publishSignificantTrades(ctx, significantTrades); err != nil {
-				return err
-			}
+	if p.significantAggregator == nil {
+		return nil
+	}
+	for _, key := range pendingKeys(p.significantAggregator.trades) {
+		if err := p.flushSignificantTradeKey(ctx, key); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
-type AlignedFlushConfig struct {
-	Interval     time.Duration
-	Timeout      time.Duration
-	AfterFlush   func(context.Context, time.Time) error
-	ErrorHandler ErrorHandler
+func (p *TradePipeline) flushSignificantTradeKeyBefore(ctx context.Context, key string, boundary time.Time) error {
+	if p.significantAggregator == nil || !hasPendingTradesBefore(p.significantAggregator.trades, key, boundary) {
+		return nil
+	}
+	return p.flushSignificantTradeKey(ctx, key)
 }
 
-func StartAlignedFlush(ctx context.Context, pipeline *TradePipeline, config AlignedFlushConfig) {
-	if pipeline == nil {
-		return
+func (p *TradePipeline) flushSignificantTradeKey(ctx context.Context, key string) error {
+	significantTrades, err := p.significantAggregator.Flush(key)
+	if err != nil {
+		return fmt.Errorf("flush significant trades: %w", err)
 	}
-
-	interval := config.Interval
-	if interval <= 0 {
-		return
-	}
-	timeout := config.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-
-	go func() {
-		for {
-			next := nextAlignedTime(time.Now(), interval)
-			timer := time.NewTimer(time.Until(next))
-			select {
-			case <-timer.C:
-				flushCtx, cancel := context.WithTimeout(context.Background(), timeout)
-				now := time.Now()
-				err := pipeline.FlushDue(flushCtx, now)
-				if err == nil && config.AfterFlush != nil {
-					err = config.AfterFlush(flushCtx, now)
-				}
-				cancel()
-				if err != nil && config.ErrorHandler != nil {
-					config.ErrorHandler(err)
-				}
-			case <-ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return
-			}
-		}
-	}()
-}
-
-func nextAlignedTime(now time.Time, interval time.Duration) time.Time {
-	return now.Truncate(interval).Add(interval)
+	return p.publishSignificantTrades(ctx, significantTrades)
 }
 
 func (p *TradePipeline) publishSignificantTrades(ctx context.Context, trades []SignificantTrade) error {
@@ -253,6 +215,11 @@ func (p *TradePipeline) publishSignificantTrades(ctx context.Context, trades []S
 		}
 	}
 	return nil
+}
+
+func hasPendingTradesBefore(trades map[string][]TradeEvent, key string, boundary time.Time) bool {
+	pendingTrades := trades[key]
+	return len(pendingTrades) != 0 && pendingTrades[len(pendingTrades)-1].Timestamp.Before(boundary)
 }
 
 func pendingKeys(trades map[string][]TradeEvent) []string {

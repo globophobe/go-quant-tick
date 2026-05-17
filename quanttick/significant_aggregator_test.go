@@ -110,6 +110,30 @@ func TestSignificantTradeAggregatorKeepsExchangeWindowsSeparate(t *testing.T) {
 	assertDecimal(t, out[0].TotalVolume, "100")
 }
 
+func TestSignificantTradeAggregatorMarksSignificantBucketNonSequentialWhenContextHasGap(t *testing.T) {
+	aggregator := NewSignificantTradeAggregator(MustDecimal("1000"), time.Minute)
+	timestamp := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+
+	out, err := aggregator.Add(testTrade("1", timestamp, withPrice("100"), withNotional("1"), withSequential(false)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected no output before significant trade, got %d", len(out))
+	}
+
+	out, err = aggregator.Add(testTrade("2", timestamp.Add(time.Second), withPrice("101"), withNotional("10")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected one significant bucket, got %d", len(out))
+	}
+	if out[0].IsSequential {
+		t.Fatal("is sequential = true, want false")
+	}
+}
+
 func TestSignificantTradeAggregatorUsesSymbolThresholdOverride(t *testing.T) {
 	aggregator := NewSignificantTradeAggregatorWithThresholds(
 		MustDecimal("1000"),

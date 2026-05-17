@@ -72,7 +72,7 @@ func TestBinanceParseTradeMessages(t *testing.T) {
 
 	assertStrings(t, tradeUIDs(trades), []string{"100", "101", "103"})
 	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
-	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{BinanceName, BinanceName, BinanceName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
@@ -118,7 +118,7 @@ func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
 
 	assertStrings(t, tradeUIDs(trades), []string{"200", "201", "203"})
 	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
-	assertBools(t, tradeSequential(trades), []bool{true, true, false})
+	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{BinanceFuturesName, BinanceFuturesName, BinanceFuturesName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1, 1})
@@ -129,20 +129,38 @@ func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
 
 func TestBinanceParseLiveTradeShape(t *testing.T) {
 	exchange := NewBinance([]string{"BTCUSDT"})
-	data := []byte(`{"e":"trade","E":1777807004059,"s":"BTCUSDT","t":6268487624,"p":"78530.40000000","q":"0.00039000","T":1777807004059,"m":true,"M":true}`)
+	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		message  string
+		uid      string
+		tickRule int
+	}{
+		{
+			message:  `{"e":"trade","E":1777807004059,"s":"BTCUSDT","t":6268487624,"p":"78530.40000000","q":"0.00039000","T":1777807004059,"m":true,"M":true}`,
+			uid:      "6268487624",
+			tickRule: -1,
+		},
+		{
+			message:  `{"e":"trade","E":1778656560209,"s":"BTCUSDT","t":6291886372,"p":"80153.50000000","q":"0.00024000","T":1778656560209,"m":false,"M":true}`,
+			uid:      "6291886372",
+			tickRule: 1,
+		},
+	}
 
-	trade, ok, err := exchange.ParseTradeMessage(
-		data,
-		time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("expected live trade shape to parse")
-	}
-	if trade.UID != "6268487624" {
-		t.Fatalf("uid = %s, want 6268487624", trade.UID)
+	for _, tc := range cases {
+		trade, ok, err := exchange.ParseTradeMessage([]byte(tc.message), receivedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("expected live trade shape to parse: %s", tc.message)
+		}
+		if trade.UID != tc.uid {
+			t.Fatalf("uid = %s, want %s", trade.UID, tc.uid)
+		}
+		if trade.TickRule != tc.tickRule {
+			t.Fatalf("tick rule = %d, want %d", trade.TickRule, tc.tickRule)
+		}
 	}
 }
 
@@ -249,6 +267,14 @@ func tradeTickRules(trades []quanttick.TradeEvent) []int {
 	values := make([]int, len(trades))
 	for i, trade := range trades {
 		values[i] = trade.TickRule
+	}
+	return values
+}
+
+func tradeNanoseconds(trades []quanttick.TradeEvent) []int {
+	values := make([]int, len(trades))
+	for i, trade := range trades {
+		values[i] = trade.Nanoseconds
 	}
 	return values
 }

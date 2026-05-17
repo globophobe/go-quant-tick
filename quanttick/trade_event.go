@@ -36,6 +36,10 @@ func NewTradeEvent(input TradeEventInput) TradeEvent {
 	if ticks == 0 {
 		ticks = 1
 	}
+	volume := input.Price.Mul(input.Notional)
+	if input.Volume != nil {
+		volume = *input.Volume
+	}
 
 	return TradeEvent{
 		Exchange:     input.Exchange,
@@ -44,7 +48,7 @@ func NewTradeEvent(input TradeEventInput) TradeEvent {
 		Timestamp:    input.Timestamp,
 		ReceivedAt:   input.ReceivedAt,
 		Price:        input.Price,
-		Volume:       input.Price.Mul(input.Notional),
+		Volume:       volume,
 		Notional:     input.Notional,
 		TickRule:     input.TickRule,
 		Nanoseconds:  input.Nanoseconds,
@@ -60,6 +64,7 @@ type TradeEventInput struct {
 	Timestamp    time.Time
 	ReceivedAt   time.Time
 	Price        Decimal
+	Volume       *Decimal
 	Notional     Decimal
 	TickRule     int
 	Nanoseconds  int

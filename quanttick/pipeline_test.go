@@ -165,54 +165,69 @@ func TestTradePipelineFlushPublishesPendingSignificantContextTick(t *testing.T) 
 	assertDecimal(t, significant.payloads[0].TotalVolume, "100")
 }
 
-func TestTradePipelineFlushDuePublishesContextTickAtWindowBoundary(t *testing.T) {
+func TestTradePipelineFlushBeforePublishesOldSignificantContextTick(t *testing.T) {
 	significant := &memoryPublisher[SignificantTrade]{}
 	pipeline := NewTradePipeline(TradePipelineConfig{
 		SignificantPublisher: significant,
 		SignificantThreshold: MustDecimal("1000"),
 		WindowDuration:       time.Minute,
 	})
-	timestamp := time.Date(2026, 4, 8, 0, 0, 59, 0, time.UTC)
-	boundary := timestamp.Truncate(time.Minute).Add(time.Minute)
+	timestamp := time.Date(2026, 4, 8, 0, 32, 0, 0, time.UTC)
 
 	if err := pipeline.Handle(
 		context.Background(),
-		testTrade("1", timestamp, withPrice("100"), withNotional("1")),
+		testTrade("large", timestamp.Add(10*time.Second), withPrice("100"), withNotional("20")),
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := pipeline.FlushDue(context.Background(), boundary.Add(-time.Nanosecond)); err != nil {
+	if err := pipeline.Handle(
+		context.Background(),
+		testTrade("tail", timestamp.Add(57*time.Second), withPrice("101"), withNotional("1")),
+	); err != nil {
 		t.Fatal(err)
 	}
-	if len(significant.payloads) != 0 {
-		t.Fatalf("significant payloads before boundary = %d, want 0", len(significant.payloads))
-	}
-
-	if err := pipeline.FlushDue(context.Background(), boundary); err != nil {
-		t.Fatal(err)
-	}
-
 	if len(significant.payloads) != 1 {
-		t.Fatalf("significant payloads at boundary = %d, want 1", len(significant.payloads))
+		t.Fatalf("significant payloads before flush-before = %d, want 1", len(significant.payloads))
 	}
-	payload := significant.payloads[0]
-	if payload.Volume != nil {
-		t.Fatalf("significant context tick volume = %v, want nil", payload.Volume)
+
+	if err := pipeline.FlushBefore(context.Background(), "test", "BTCUSD", timestamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
 	}
-	if !payload.Timestamp.Equal(timestamp) {
-		t.Fatalf("timestamp = %s, want %s", payload.Timestamp, timestamp)
+
+	if len(significant.payloads) != 2 {
+		t.Fatalf("significant payloads after flush-before = %d, want 2", len(significant.payloads))
 	}
-	assertDecimal(t, payload.TotalVolume, "100")
+	contextTick := significant.payloads[1]
+	if contextTick.UID != "tail" {
+		t.Fatalf("context uid = %s, want tail", contextTick.UID)
+	}
+	if contextTick.Volume != nil {
+		t.Fatalf("context volume = %v, want nil", contextTick.Volume)
+	}
+	assertDecimal(t, contextTick.TotalVolume, "101")
 }
 
-func TestNextAlignedTime(t *testing.T) {
-	now := time.Date(2026, 4, 8, 0, 0, 30, 123, time.UTC)
-	want := time.Date(2026, 4, 8, 0, 1, 0, 0, time.UTC)
+func TestTradePipelineFlushBeforeKeepsCurrentMinutePending(t *testing.T) {
+	significant := &memoryPublisher[SignificantTrade]{}
+	pipeline := NewTradePipeline(TradePipelineConfig{
+		SignificantPublisher: significant,
+		SignificantThreshold: MustDecimal("1000"),
+		WindowDuration:       time.Minute,
+	})
+	timestamp := time.Date(2026, 4, 8, 0, 32, 10, 0, time.UTC)
 
-	got := nextAlignedTime(now, time.Minute)
+	if err := pipeline.Handle(
+		context.Background(),
+		testTrade("tail", timestamp, withPrice("100"), withNotional("1")),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.FlushBefore(context.Background(), "test", "BTCUSD", timestamp.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
 
-	if !got.Equal(want) {
-		t.Fatalf("next aligned time = %s, want %s", got, want)
+	if len(significant.payloads) != 0 {
+		t.Fatalf("significant payloads after current-minute flush-before = %d, want 0", len(significant.payloads))
 	}
 }
 

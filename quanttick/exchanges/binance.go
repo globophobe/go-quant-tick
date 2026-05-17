@@ -143,12 +143,16 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 	if err != nil {
 		return quanttick.TradeEvent{}, false, fmt.Errorf("parse binance quantity: %w", err)
 	}
+	buyerIsMaker, err := binanceBuyerIsMaker(data)
+	if err != nil {
+		return quanttick.TradeEvent{}, false, err
+	}
 
 	tradeID := msg.TradeID
 	prevID, hadPrevID := b.lastIDs[msg.Symbol]
 	b.lastIDs[msg.Symbol] = tradeID
 	tickRule := 1
-	if msg.BuyerIsMaker {
+	if buyerIsMaker {
 		tickRule = -1
 	}
 
@@ -161,7 +165,7 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
-		IsSequential: !hadPrevID || tradeID == prevID+1,
+		IsSequential: hadPrevID && tradeID == prevID+1,
 	}), true, nil
 }
 
@@ -212,12 +216,30 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 }
 
 type binanceTradeMessage struct {
-	Symbol       string `json:"s"`
-	TradeID      int64  `json:"t"`
-	TradeTime    int64  `json:"T"`
-	Price        string `json:"p"`
-	Quantity     string `json:"q"`
-	BuyerIsMaker bool   `json:"m"`
+	Symbol    string `json:"s"`
+	TradeID   int64  `json:"t"`
+	TradeTime int64  `json:"T"`
+	Price     string `json:"p"`
+	Quantity  string `json:"q"`
+}
+
+func binanceBuyerIsMaker(data []byte) (bool, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return false, fmt.Errorf("parse binance buyer maker envelope: %w", err)
+	}
+	raw, ok := envelope["m"]
+	if !ok {
+		return false, fmt.Errorf("parse binance buyer maker: missing m")
+	}
+
+	// encoding/json matches field tags case-insensitively, so read exact "m"
+	// to avoid Binance's "M" flag overwriting buyer-is-maker.
+	var buyerIsMaker bool
+	if err := json.Unmarshal(raw, &buyerIsMaker); err != nil {
+		return false, fmt.Errorf("parse binance buyer maker: %w", err)
+	}
+	return buyerIsMaker, nil
 }
 
 func binanceEventType(data []byte) (string, bool, error) {

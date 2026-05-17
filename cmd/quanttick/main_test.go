@@ -44,6 +44,28 @@ func TestPublisherModeNormalizesValue(t *testing.T) {
 	}
 }
 
+func TestUpdateFlushWatermarkKeepsPerSymbolHighWater(t *testing.T) {
+	watermarks := make(map[string]time.Time)
+	start := time.Date(2026, 5, 16, 2, 12, 0, 0, time.UTC)
+	latest := start.Add(6 * time.Minute)
+	late := start.Add(46 * time.Second)
+
+	if got := updateFlushWatermark(watermarks, testCommandTrade("1", "bitmex", "XBTUSD", start)); !got.Equal(start) {
+		t.Fatalf("first watermark = %s, want %s", got, start)
+	}
+	if got := updateFlushWatermark(watermarks, testCommandTrade("2", "bitmex", "XBTUSD", latest)); !got.Equal(latest) {
+		t.Fatalf("advanced watermark = %s, want %s", got, latest)
+	}
+	if got := updateFlushWatermark(watermarks, testCommandTrade("3", "bitmex", "XBTUSD", late)); !got.Equal(latest) {
+		t.Fatalf("late watermark = %s, want %s", got, latest)
+	}
+
+	other := start.Add(time.Minute)
+	if got := updateFlushWatermark(watermarks, testCommandTrade("4", "coinbase", "BTC-USD", other)); !got.Equal(other) {
+		t.Fatalf("other symbol watermark = %s, want %s", got, other)
+	}
+}
+
 func TestNewPipelineFromEnvUsesStdoutPublisher(t *testing.T) {
 	t.Setenv("WEBSOCKET_DATA_STREAMS", "raw-trades")
 
@@ -76,8 +98,11 @@ func TestNewPipelineFromEnvUsesDatabasePublisher(t *testing.T) {
 	}
 	defer cleanup()
 
-	if pipeline.SignificantPublisher == nil {
-		t.Fatal("significant publisher should be configured")
+	if pipeline.AggregatedPublisher == nil {
+		t.Fatal("aggregated publisher should be configured so DB filtered trades can be derived")
+	}
+	if pipeline.SignificantPublisher != nil {
+		t.Fatal("DB publisher should derive filtered trades from aggregated buckets, not stream significant trades directly")
 	}
 	if flusher == nil {
 		t.Fatal("database publisher should return a bucket flusher")
@@ -91,10 +116,10 @@ func TestNewPipelineFromEnvDefaultsToDatabase(t *testing.T) {
 }
 
 func TestCloudSQLInstanceConnectionNameStripsSocketPrefix(t *testing.T) {
-	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:dqt")
+	t.Setenv("PRODUCTION_DATABASE_HOST", "/cloudsql/project:region:database")
 
-	if got := cloudSQLInstanceConnectionName(); got != "project:region:dqt" {
-		t.Fatalf("instance connection name = %s, want project:region:dqt", got)
+	if got := cloudSQLInstanceConnectionName(); got != "project:region:database" {
+		t.Fatalf("instance connection name = %s, want project:region:database", got)
 	}
 }
 
@@ -200,14 +225,6 @@ func TestSignificantThresholdAllowsZero(t *testing.T) {
 	}
 }
 
-func TestRuntimeFlushTimeoutReadsDuration(t *testing.T) {
-	t.Setenv("FLUSH_TIMEOUT", "3s")
-
-	if got := runtimeFlushTimeout(); got != 3*time.Second {
-		t.Fatalf("timeout = %s, want 3s", got)
-	}
-}
-
 func TestShutdownFlushTimeoutReadsDuration(t *testing.T) {
 	t.Setenv("SHUTDOWN_FLUSH_TIMEOUT", "3s")
 
@@ -237,4 +254,18 @@ func TestExchangesFromEnvWithBlankSymbolsDoesNothing(t *testing.T) {
 	if len(thresholds) != 0 {
 		t.Fatalf("thresholds = %#v, want empty", thresholds)
 	}
+}
+
+func testCommandTrade(uid string, exchange string, symbol string, timestamp time.Time) quanttick.TradeEvent {
+	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
+		Exchange:     exchange,
+		UID:          uid,
+		Symbol:       symbol,
+		Timestamp:    timestamp,
+		ReceivedAt:   timestamp,
+		Price:        quanttick.MustDecimal("100"),
+		Notional:     quanttick.MustDecimal("1"),
+		TickRule:     1,
+		IsSequential: true,
+	})
 }

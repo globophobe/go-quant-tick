@@ -53,6 +53,30 @@ func TestTradeAggregatorAggregatesTrades(t *testing.T) {
 	assertDecimal(t, flushed.Volume, "300")
 }
 
+func TestTradeAggregatorMarksAggregateNonSequentialWhenAnyTradeHasGap(t *testing.T) {
+	aggregator := NewTradeAggregator()
+	timestamp := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+
+	_, err := aggregator.Add(testTrade("1", timestamp, withNanoseconds(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = aggregator.Add(testTrade("2", timestamp, withNanoseconds(1), withSequential(false)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := aggregator.Add(testTrade("3", timestamp, withNanoseconds(2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected one flushed aggregate, got %d", len(out))
+	}
+	if out[0].IsSequential {
+		t.Fatal("is sequential = true, want false")
+	}
+}
+
 func TestTradeAggregatorKeepsExchangesSeparate(t *testing.T) {
 	aggregator := NewTradeAggregator()
 	timestamp := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -52,10 +54,6 @@ type websocketDataTradePublisher struct {
 	buffer *WebSocketDataBuffer
 }
 
-type websocketDataSignificantTradePublisher struct {
-	buffer *WebSocketDataBuffer
-}
-
 func NewWebSocketDataStore(db *sql.DB) *WebSocketDataStore {
 	return &WebSocketDataStore{db: db}
 }
@@ -79,10 +77,6 @@ func (b *WebSocketDataBuffer) AggregatedPublisher() Publisher[TradeEvent] {
 	return websocketDataTradePublisher{stream: AggregatedTrades, buffer: b}
 }
 
-func (b *WebSocketDataBuffer) SignificantPublisher() Publisher[SignificantTrade] {
-	return websocketDataSignificantTradePublisher{buffer: b}
-}
-
 func (p websocketDataTradePublisher) Publish(ctx context.Context, trade TradeEvent) error {
 	select {
 	case <-ctx.Done():
@@ -90,24 +84,6 @@ func (p websocketDataTradePublisher) Publish(ctx context.Context, trade TradeEve
 	default:
 	}
 	return p.buffer.addTrade(p.stream, trade)
-}
-
-func (p websocketDataSignificantTradePublisher) Publish(ctx context.Context, trade SignificantTrade) error {
-	return p.PublishBatch(ctx, []SignificantTrade{trade})
-}
-
-func (p websocketDataSignificantTradePublisher) PublishBatch(ctx context.Context, trades []SignificantTrade) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	for _, trade := range trades {
-		if err := p.buffer.addSignificantTrade(trade); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (b *WebSocketDataBuffer) addTrade(stream Stream, trade TradeEvent) error {
@@ -132,21 +108,6 @@ func (b *WebSocketDataBuffer) addTrade(stream Stream, trade TradeEvent) error {
 	return nil
 }
 
-func (b *WebSocketDataBuffer) addSignificantTrade(trade SignificantTrade) error {
-	filter, err := decimalToInt64(trade.SignificantTradeFilter)
-	if err != nil {
-		return err
-	}
-	key := newWebSocketDataBucketKey(trade.Exchange, trade.Symbol, filter, trade.Timestamp)
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	bucket := b.bucket(key)
-	bucket.FilteredTrades = append(bucket.FilteredTrades, trade)
-	b.buckets[key] = bucket
-	return nil
-}
-
 func (b *WebSocketDataBuffer) bucket(key websocketDataBucketKey) WebSocketDataBucket {
 	bucket, ok := b.buckets[key]
 	if ok {
@@ -160,9 +121,10 @@ func (b *WebSocketDataBuffer) bucket(key websocketDataBucketKey) WebSocketDataBu
 	}
 }
 
-func (b *WebSocketDataBuffer) FlushDue(ctx context.Context, now time.Time) (int, error) {
+func (b *WebSocketDataBuffer) FlushBefore(ctx context.Context, exchange string, symbol string, timestamp time.Time) (int, error) {
+	boundary := timestamp.UTC().Truncate(time.Minute)
 	return b.flush(ctx, func(key websocketDataBucketKey) bool {
-		return !key.timestamp.Add(time.Minute).After(now.UTC())
+		return key.exchange == exchange && key.symbol == symbol && key.timestamp.Before(boundary)
 	})
 }
 
@@ -258,6 +220,14 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 	defer tx.Rollback()
 
 	for _, bucket := range buckets {
+		bucket, err = mergeExistingWebSocketDataBucket(ctx, tx, bucket)
+		if err != nil {
+			return err
+		}
+		bucket, err = deriveWebSocketDataBucket(bucket)
+		if err != nil {
+			return err
+		}
 		rawTrades, err := marshalJSONList(bucket.RawTrades)
 		if err != nil {
 			return fmt.Errorf("marshal raw trades: %w", err)
@@ -294,6 +264,240 @@ func (s *WebSocketDataStore) UpsertBuckets(ctx context.Context, buckets []WebSoc
 	return nil
 }
 
+func mergeExistingWebSocketDataBucket(ctx context.Context, tx *sql.Tx, bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	var rawTradesPayload, aggregatedTradesPayload string
+	err := tx.QueryRowContext(
+		ctx,
+		selectWebSocketDataSQL,
+		bucket.Exchange,
+		bucket.APISymbol,
+		bucket.SignificantTradeFilter,
+		bucket.Timestamp,
+	).Scan(&rawTradesPayload, &aggregatedTradesPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return bucket, nil
+	}
+	if err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("read existing websocket data bucket %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+	}
+
+	var rawTrades []TradeEvent
+	if err := unmarshalJSONList(rawTradesPayload, &rawTrades); err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("parse existing raw trades: %w", err)
+	}
+	var aggregatedTrades []TradeEvent
+	if err := unmarshalJSONList(aggregatedTradesPayload, &aggregatedTrades); err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("parse existing aggregated trades: %w", err)
+	}
+
+	bucket.RawTrades = mergeTradesByUID(rawTrades, bucket.RawTrades)
+	bucket.AggregatedTrades = mergeTradesByUID(aggregatedTrades, bucket.AggregatedTrades)
+	bucket.FilteredTrades = nil
+	return bucket, nil
+}
+
+func deriveWebSocketDataBucket(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	if shouldDeriveBitfinexTradesFromRaw(bucket) {
+		bucket.RawTrades = sortBitfinexRawTrades(bucket.APISymbol, bucket.RawTrades)
+		aggregatedTrades, err := aggregateTradeEvents(bucket.RawTrades)
+		if err != nil {
+			return WebSocketDataBucket{}, fmt.Errorf("derive bitfinex aggregated trades for %s %s: %w", bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+		}
+		bucket.AggregatedTrades = aggregatedTrades
+	}
+	return deriveFilteredTradesFromAggregated(bucket)
+}
+
+func shouldDeriveBitfinexTradesFromRaw(bucket WebSocketDataBucket) bool {
+	return bucket.Exchange == "bitfinex" && len(bucket.RawTrades) > 0
+}
+
+// Bitfinex spot REST display order is not fully inferable from the websocket
+// payload or receive order. Use the same deterministic UID order for spot and
+// derivatives so derived websocket buckets are internally consistent, even if
+// spot cannot always match REST display order exactly.
+func sortBitfinexRawTrades(_ string, rawTrades []TradeEvent) []TradeEvent {
+	return sortBitfinexRawTradesByUID(rawTrades)
+}
+
+func sortBitfinexRawTradesByUID(rawTrades []TradeEvent) []TradeEvent {
+	trades := append([]TradeEvent(nil), rawTrades...)
+	sort.SliceStable(trades, func(i, j int) bool {
+		return bitfinexUIDLess(trades[i].UID, trades[j].UID)
+	})
+	return trades
+}
+
+func bitfinexUIDLess(left string, right string) bool {
+	leftID, leftErr := strconv.ParseInt(left, 10, 64)
+	rightID, rightErr := strconv.ParseInt(right, 10, 64)
+	if leftErr != nil || rightErr != nil {
+		return left < right
+	}
+	return leftID < rightID
+}
+
+func aggregateTradeEvents(trades []TradeEvent) ([]TradeEvent, error) {
+	if len(trades) == 0 {
+		return nil, nil
+	}
+
+	aggregatedTrades := make([]TradeEvent, 0, len(trades))
+	start := 0
+	for index := 1; index < len(trades); index++ {
+		if sameSample(trades[start], trades[index]) {
+			continue
+		}
+		aggregated, err := aggregateTrades(trades[start:index])
+		if err != nil {
+			return nil, err
+		}
+		aggregatedTrades = append(aggregatedTrades, aggregated)
+		start = index
+	}
+
+	aggregated, err := aggregateTrades(trades[start:])
+	if err != nil {
+		return nil, err
+	}
+	aggregatedTrades = append(aggregatedTrades, aggregated)
+	return aggregatedTrades, nil
+}
+
+func deriveFilteredTradesFromAggregated(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	if len(bucket.AggregatedTrades) == 0 {
+		bucket.FilteredTrades = nil
+		return bucket, nil
+	}
+
+	threshold := decimal.NewFromInt(bucket.SignificantTradeFilter)
+	filteredTrades, err := volumeFilterAggregatedTrades(bucket.AggregatedTrades, threshold)
+	if err != nil {
+		return WebSocketDataBucket{}, fmt.Errorf("derive filtered trades for %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+	}
+	bucket.FilteredTrades = filteredTrades
+	return bucket, nil
+}
+
+func volumeFilterAggregatedTrades(trades []TradeEvent, threshold Decimal) ([]SignificantTrade, error) {
+	filteredTrades := make([]SignificantTrade, 0, len(trades))
+	start := 0
+	for index, trade := range trades {
+		isMinVolume := threshold.IsZero() || trade.Volume.GreaterThanOrEqual(threshold)
+		if !isMinVolume {
+			continue
+		}
+		filteredTrade, err := aggregateFilteredTradeSegment(trades[start:index+1], true, threshold)
+		if err != nil {
+			return nil, err
+		}
+		filteredTrades = append(filteredTrades, filteredTrade)
+		start = index + 1
+	}
+	if start < len(trades) {
+		filteredTrade, err := aggregateFilteredTradeSegment(trades[start:], false, threshold)
+		if err != nil {
+			return nil, err
+		}
+		filteredTrades = append(filteredTrades, filteredTrade)
+	}
+	return filteredTrades, nil
+}
+
+func aggregateFilteredTradeSegment(trades []TradeEvent, isMinVolume bool, threshold Decimal) (SignificantTrade, error) {
+	if len(trades) == 0 {
+		return SignificantTrade{}, fmt.Errorf("cannot filter empty trade set")
+	}
+
+	high := trades[0].Price
+	low := trades[0].Price
+	totalBuyVolume := Decimal{}
+	totalVolume := Decimal{}
+	totalBuyNotional := Decimal{}
+	totalNotional := Decimal{}
+	totalBuyTicks := 0
+	totalTicks := 0
+	allSequential := true
+	for _, trade := range trades {
+		if trade.Price.GreaterThan(high) {
+			high = trade.Price
+		}
+		if trade.Price.LessThan(low) {
+			low = trade.Price
+		}
+		if trade.TickRule == 1 {
+			totalBuyVolume = totalBuyVolume.Add(trade.Volume)
+			totalBuyNotional = totalBuyNotional.Add(trade.Notional)
+			totalBuyTicks += trade.Ticks
+		}
+		totalVolume = totalVolume.Add(trade.Volume)
+		totalNotional = totalNotional.Add(trade.Notional)
+		totalTicks += trade.Ticks
+		allSequential = allSequential && trade.IsSequential
+	}
+
+	last := trades[len(trades)-1]
+	filteredTrade := SignificantTrade{
+		Exchange:               last.Exchange,
+		UID:                    last.UID,
+		Symbol:                 last.Symbol,
+		Timestamp:              last.Timestamp,
+		Nanoseconds:            last.Nanoseconds,
+		Price:                  last.Price,
+		IsSequential:           allSequential,
+		High:                   high,
+		Low:                    low,
+		TotalBuyVolume:         totalBuyVolume,
+		TotalVolume:            totalVolume,
+		TotalBuyNotional:       totalBuyNotional,
+		TotalNotional:          totalNotional,
+		TotalBuyTicks:          totalBuyTicks,
+		TotalTicks:             totalTicks,
+		SignificantTradeFilter: threshold,
+	}
+	if isMinVolume {
+		filteredTrade.Volume = decimalPtr(last.Volume)
+		filteredTrade.Notional = decimalPtr(last.Notional)
+		filteredTrade.TickRule = intPtr(last.TickRule)
+		filteredTrade.Ticks = intPtr(last.Ticks)
+	}
+	return filteredTrade, nil
+}
+
+func mergeTradesByUID(existing []TradeEvent, incoming []TradeEvent) []TradeEvent {
+	return mergeByUID(existing, incoming, func(trade TradeEvent) string { return trade.UID })
+}
+
+func mergeByUID[T any](existing []T, incoming []T, getUID func(T) string) []T {
+	if len(existing) == 0 {
+		return incoming
+	}
+	if len(incoming) == 0 {
+		return existing
+	}
+	merged := append([]T(nil), existing...)
+	seen := make(map[string]struct{}, len(existing))
+	for _, item := range existing {
+		uid := getUID(item)
+		if uid != "" {
+			seen[uid] = struct{}{}
+		}
+	}
+	for _, item := range incoming {
+		uid := getUID(item)
+		if uid == "" {
+			merged = append(merged, item)
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		merged = append(merged, item)
+	}
+	return merged
+}
+
 func deleteOldWebSocketData(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
 	if _, err := tx.ExecContext(ctx, deleteOldWebSocketDataSQL, cutoff); err != nil {
 		return fmt.Errorf("delete old websocket data rows: %w", err)
@@ -307,6 +511,22 @@ func marshalJSONList[T any](values []T) ([]byte, error) {
 	}
 	return json.Marshal(values)
 }
+
+func unmarshalJSONList[T any](payload string, values *[]T) error {
+	if payload == "" {
+		*values = nil
+		return nil
+	}
+	return json.Unmarshal([]byte(payload), values)
+}
+
+const selectWebSocketDataSQL = `
+SELECT raw_trades, aggregated_trades
+FROM quant_tick_websocket_data
+WHERE exchange = $1
+	AND api_symbol = $2
+	AND significant_trade_filter = $3
+	AND timestamp = $4`
 
 const upsertWebSocketDataSQL = `
 INSERT INTO quant_tick_websocket_data (

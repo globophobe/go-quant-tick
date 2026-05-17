@@ -101,28 +101,29 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 		return quanttick.TradeEvent{}, ok, err
 	}
 
-	price, notional, timestamp, err := parseCoinbaseTradeFields(msg)
+	price, notional, timestamp, nanoseconds, err := parseCoinbaseTradeFields(msg)
 	if err != nil {
 		return quanttick.TradeEvent{}, false, err
 	}
 
 	prevID, hadPrevID := c.lastIDs[msg.ProductID]
 	c.lastIDs[msg.ProductID] = msg.TradeID
-	tickRule := 1
+	tickRule := -1
 	if strings.ToLower(msg.Side) == "sell" {
-		tickRule = -1
+		tickRule = 1
 	}
 
 	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
 		Exchange:     CoinbaseName,
 		UID:          strconv.FormatInt(msg.TradeID, 10),
 		Symbol:       msg.ProductID,
-		Timestamp:    timestamp.UTC(),
+		Timestamp:    timestamp,
+		Nanoseconds:  nanoseconds,
 		ReceivedAt:   receivedAt,
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
-		IsSequential: !hadPrevID || msg.TradeID == prevID+1,
+		IsSequential: hadPrevID && msg.TradeID == prevID+1,
 	}), true, nil
 }
 
@@ -137,20 +138,21 @@ func parseCoinbaseMatchMessage(data []byte) (coinbaseMatchMessage, bool, error) 
 	return msg, true, nil
 }
 
-func parseCoinbaseTradeFields(msg coinbaseMatchMessage) (quanttick.Decimal, quanttick.Decimal, time.Time, error) {
+func parseCoinbaseTradeFields(msg coinbaseMatchMessage) (quanttick.Decimal, quanttick.Decimal, time.Time, int, error) {
 	price, err := quanttick.ParseDecimal(msg.Price)
 	if err != nil {
-		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, fmt.Errorf("parse coinbase price: %w", err)
+		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, 0, fmt.Errorf("parse coinbase price: %w", err)
 	}
 	notional, err := quanttick.ParseDecimal(msg.Size)
 	if err != nil {
-		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, fmt.Errorf("parse coinbase size: %w", err)
+		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, 0, fmt.Errorf("parse coinbase size: %w", err)
 	}
 	timestamp, err := time.Parse(time.RFC3339Nano, msg.Time)
 	if err != nil {
-		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, fmt.Errorf("parse coinbase time: %w", err)
+		return quanttick.Decimal{}, quanttick.Decimal{}, time.Time{}, 0, fmt.Errorf("parse coinbase time: %w", err)
 	}
-	return price, notional, timestamp.UTC(), nil
+	timestamp, nanoseconds := splitEventTimestamp(timestamp)
+	return price, notional, timestamp, nanoseconds, nil
 }
 
 func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {

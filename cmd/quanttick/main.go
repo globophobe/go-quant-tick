@@ -59,29 +59,27 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	if err != nil {
 		return err
 	}
-	alignedFlushCtx, stopAlignedFlush := context.WithCancel(ctx)
-	quanttick.StartAlignedFlush(alignedFlushCtx, pipeline, quanttick.AlignedFlushConfig{
-		Interval: time.Minute,
-		Timeout:  runtimeFlushTimeout(),
-		AfterFlush: func(ctx context.Context, now time.Time) error {
-			dueFlusher, ok := bucketFlusher.(interface {
-				FlushDue(context.Context, time.Time) (int, error)
-			})
-			if !ok {
-				return nil
+	handler := pipeline.Handle
+	if eventFlusher, ok := bucketFlusher.(interface {
+		FlushBefore(context.Context, string, string, time.Time) (int, error)
+	}); ok {
+		flushWatermarks := make(map[string]time.Time)
+		handler = func(ctx context.Context, trade quanttick.TradeEvent) error {
+			if err := pipeline.Handle(ctx, trade); err != nil {
+				return err
 			}
-			_, err := dueFlusher.FlushDue(ctx, now)
+			flushTimestamp := updateFlushWatermark(flushWatermarks, trade)
+			if err := pipeline.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp); err != nil {
+				return err
+			}
+			_, err := eventFlusher.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp)
 			return err
-		},
-		ErrorHandler: func(err error) {
-			log.Printf("pipeline timer flush error: %v", err)
-			reporter.Capture(err)
-		},
-	})
+		}
+	}
 
 	var runErr error
 	if hasTradeStreams(streams) && len(clients) > 0 {
-		runErr = quanttick.RunExchanges(ctx, clients, pipeline.Handle, func(err error) {
+		runErr = quanttick.RunExchanges(ctx, clients, handler, func(err error) {
 			log.Printf("exchange error: %v", err)
 			reporter.Capture(err)
 		})
@@ -91,7 +89,6 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			runErr = ctx.Err()
 		}
 	}
-	stopAlignedFlush()
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
 		if runErr == nil {
@@ -122,6 +119,16 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		return runErr
 	}
 	return nil
+}
+
+func updateFlushWatermark(watermarks map[string]time.Time, trade quanttick.TradeEvent) time.Time {
+	key := quanttick.ExchangeSymbolKey(trade.Exchange, trade.Symbol)
+	timestamp := trade.Timestamp.UTC()
+	if watermark, ok := watermarks[key]; ok && watermark.After(timestamp) {
+		return watermark
+	}
+	watermarks[key] = timestamp
+	return timestamp
 }
 
 func hasTradeStreams(streams map[quanttick.Stream]bool) bool {
@@ -311,11 +318,8 @@ func configureDatabasePublishers(
 	if streams[quanttick.RawTrades] {
 		config.RawPublisher = buffer.RawPublisher()
 	}
-	if streams[quanttick.AggregatedTrades] {
+	if streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades] {
 		config.AggregatedPublisher = buffer.AggregatedPublisher()
-	}
-	if streams[quanttick.SignificantTrades] {
-		config.SignificantPublisher = buffer.SignificantPublisher()
 	}
 	if err := db.PingContext(ctx); err != nil {
 		return fail(fmt.Errorf("ping database: %w", err))
@@ -472,10 +476,6 @@ func flushPipeline(pipeline *quanttick.TradePipeline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout())
 	defer cancel()
 	return pipeline.Flush(ctx)
-}
-
-func runtimeFlushTimeout() time.Duration {
-	return durationEnvDefault("FLUSH_TIMEOUT", 5*time.Second)
 }
 
 func shutdownFlushTimeout() time.Duration {

@@ -3,6 +3,9 @@ package exchanges
 import (
 	"fmt"
 	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -40,6 +43,18 @@ func TestIsNormalWebSocketClose(t *testing.T) {
 		{
 			name: "wrapped eof",
 			err:  fmt.Errorf("read websocket: failed to read frame header: %w", io.EOF),
+			want: true,
+		},
+		{
+			name: "wrapped connection reset",
+			err: fmt.Errorf(
+				"read websocket: failed to read frame header: %w",
+				&net.OpError{
+					Op:  "read",
+					Net: "tcp",
+					Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+				},
+			),
 			want: true,
 		},
 		{
