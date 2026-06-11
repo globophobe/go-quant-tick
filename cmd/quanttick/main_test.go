@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -41,6 +42,48 @@ func TestPublisherModeDefaultsToDB(t *testing.T) {
 func TestPublisherModeNormalizesValue(t *testing.T) {
 	if got := publisherMode(" STDOUT "); got != "stdout" {
 		t.Fatalf("publisher mode = %s, want stdout", got)
+	}
+}
+
+func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "cloudflare 520",
+			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 520"),
+			want: true,
+		},
+		{
+			name: "server 503",
+			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 503"),
+			want: true,
+		},
+		{
+			name: "rate limited",
+			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 429"),
+			want: true,
+		},
+		{
+			name: "forbidden is not transient",
+			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 403"),
+			want: false,
+		},
+		{
+			name: "parse error is not transient",
+			err:  errors.New("parse coinbase message: bad payload"),
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransientExchangeError(tc.err); got != tc.want {
+				t.Fatalf("isTransientExchangeError() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
