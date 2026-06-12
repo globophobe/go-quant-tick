@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,6 +82,10 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 	var runErr error
 	if hasTradeStreams(streams) && len(clients) > 0 {
 		runErr = quanttick.RunExchanges(ctx, clients, handler, func(err error) {
+			if isTransientExchangeError(err) {
+				log.Printf("temporary exchange error: %v", err)
+				return
+			}
 			log.Printf("exchange error: %v", err)
 			reporter.Capture(err)
 		})
@@ -133,6 +139,27 @@ func updateFlushWatermark(watermarks map[string]time.Time, trade quanttick.Trade
 
 func hasTradeStreams(streams map[quanttick.Stream]bool) bool {
 	return streams[quanttick.RawTrades] || streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades]
+}
+
+var websocketHandshakeStatusPattern = regexp.MustCompile(`expected handshake response status code 101 but got ([0-9]+)`)
+
+func isTransientExchangeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	if !strings.Contains(text, "failed to WebSocket dial") {
+		return false
+	}
+	match := websocketHandshakeStatusPattern.FindStringSubmatch(text)
+	if len(match) != 2 {
+		return false
+	}
+	status, parseErr := strconv.Atoi(match[1])
+	if parseErr != nil {
+		return false
+	}
+	return status == 429 || status >= 500
 }
 
 const sentryFlushTimeout = 2 * time.Second
