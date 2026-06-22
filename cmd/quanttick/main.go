@@ -147,6 +147,9 @@ func isTransientExchangeError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isTransientWebSocketReadError(err) {
+		return true
+	}
 	text := err.Error()
 	if !strings.Contains(text, "failed to WebSocket dial") {
 		return false
@@ -160,6 +163,18 @@ func isTransientExchangeError(err error) bool {
 		return false
 	}
 	return status == 429 || status >= 500
+}
+
+func isTransientWebSocketReadError(err error) bool {
+	text := err.Error()
+	if !strings.Contains(text, "read ") || !strings.Contains(text, " websocket") {
+		return false
+	}
+	if errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 const sentryFlushTimeout = 2 * time.Second

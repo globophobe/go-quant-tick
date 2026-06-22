@@ -5,6 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -64,6 +68,18 @@ func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t
 		{
 			name: "rate limited",
 			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 429"),
+			want: true,
+		},
+		{
+			name: "websocket read timeout",
+			err: fmt.Errorf(
+				"read bitfinex websocket: failed to get reader: failed to read frame header: %w",
+				&net.OpError{
+					Op:  "read",
+					Net: "tcp",
+					Err: &os.SyscallError{Syscall: "read", Err: syscall.ETIMEDOUT},
+				},
+			),
 			want: true,
 		},
 		{
