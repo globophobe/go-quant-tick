@@ -590,9 +590,9 @@ func webSocketDataTradeLess(exchange string, stream Stream, left TradeEvent, rig
 	if left.Nanoseconds != right.Nanoseconds {
 		return left.Nanoseconds < right.Nanoseconds
 	}
-	// BitMEX match IDs and Hyperliquid trade IDs are opaque, not sequences.
-	// For equal exchange timestamps, retain stable feed order rather than inventing one.
-	if exchange == "bitmex" || exchange == "hyperliquid" {
+	// These venues use opaque trade IDs rather than sortable sequences. For exact
+	// timestamp ties, retain stable feed order instead of inventing UUID ordering.
+	if exchange == "bitmex" || exchange == "bybit" || exchange == "hyperliquid" {
 		return false
 	}
 	return tradeUIDLess(left.UID, right.UID)

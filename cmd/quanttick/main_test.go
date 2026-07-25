@@ -233,13 +233,14 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 
 func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
+	t.Setenv("BYBIT_SYMBOLS", "BTCUSDT=30000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := 2
+	wantClients := 3
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
@@ -250,6 +251,13 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	}
 	if !threshold.Equal(quanttick.MustDecimal("25000")) {
 		t.Fatalf("threshold = %s, want 25000", threshold)
+	}
+	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.BybitName, "BTCUSDT")]
+	if !ok {
+		t.Fatal("expected Bybit BTCUSDT threshold")
+	}
+	if !threshold.Equal(quanttick.MustDecimal("30000")) {
+		t.Fatalf("threshold = %s, want 30000", threshold)
 	}
 	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.HyperliquidName, "PURR/USDC")]
 	if !ok {
