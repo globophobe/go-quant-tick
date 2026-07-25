@@ -78,6 +78,7 @@ Environment variables:
 ```shell
 BINANCE_SYMBOLS=BTCUSDT=10000
 BINANCE_FUTURES_SYMBOLS=BTCUSDT
+BYBIT_SYMBOLS=BTCUSDT
 BITFINEX_SYMBOLS=tBTCF0:USTF0
 BITMEX_SYMBOLS=XBTUSD
 COINBASE_SYMBOLS=BTC-USD
@@ -103,6 +104,7 @@ Each example prints significant-trade JSON lines until interrupted:
 ```shell
 go run ./examples/binance
 go run ./examples/binance-futures
+go run ./examples/bybit
 go run ./examples/coinbase
 go run ./examples/bitfinex
 go run ./examples/bitmex
@@ -120,9 +122,13 @@ Supported exchanges
 
 ✅ Binance
 
+✅ Binance Futures
+
 ✅ Bitfinex
 
 ✅ BitMEX
+
+✅ Bybit
 
 ✅ Coinbase
 
