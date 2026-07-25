@@ -197,8 +197,10 @@ func (b *Binance) parseTradeMessage(
 	}
 
 	tradeID := msg.TradeID
+	ticks := 1
 	if b.stream == "aggTrade" {
 		tradeID = msg.AggregateTradeID
+		ticks = int(msg.LastTradeID - msg.FirstTradeID + 1)
 	}
 	prevID, hadPrevID := lastIDs[msg.Symbol]
 	lastIDs[msg.Symbol] = tradeID
@@ -216,6 +218,7 @@ func (b *Binance) parseTradeMessage(
 		Price:        price,
 		Notional:     notional,
 		TickRule:     tickRule,
+		Ticks:        ticks,
 		IsSequential: hadPrevID && tradeID == prevID+1,
 	})
 	return binanceParsedTrade{event: event, tradeID: tradeID}, true, nil
@@ -415,6 +418,8 @@ type binanceTradeMessage struct {
 	Symbol           string `json:"s"`
 	TradeID          int64  `json:"t"`
 	AggregateTradeID int64  `json:"a"`
+	FirstTradeID     int64  `json:"f"`
+	LastTradeID      int64  `json:"l"`
 	TradeTime        int64  `json:"T"`
 	Price            string `json:"p"`
 	Quantity         string `json:"q"`

@@ -124,7 +124,7 @@ func TestBinanceFuturesParseAggregateTradeMessages(t *testing.T) {
 	}
 
 	assertStrings(t, tradeUIDs(trades), []string{"200", "201", "203"})
-	assertInts(t, tradeTicks(trades), []int{1, 1, 1})
+	assertInts(t, tradeTicks(trades), []int{3, 1, 3})
 	assertBools(t, tradeSequential(trades), []bool{false, true, false})
 	assertStrings(t, tradeExchanges(trades), []string{BinanceFuturesName, BinanceFuturesName, BinanceFuturesName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT", "BTCUSDT"})
@@ -151,7 +151,7 @@ func TestBinanceFuturesParseCombinedAggregateTradeMessage(t *testing.T) {
 	if trade.UID != "5933014" || trade.Exchange != BinanceFuturesName || trade.Symbol != "BTCUSDT" {
 		t.Fatalf("trade identity = %#v", trade)
 	}
-	if trade.TickRule != -1 || !trade.Notional.Equal(quanttick.MustDecimal("2")) {
+	if trade.TickRule != -1 || trade.Ticks != 6 || !trade.Notional.Equal(quanttick.MustDecimal("2")) {
 		t.Fatalf("trade normalization = %#v", trade)
 	}
 }
