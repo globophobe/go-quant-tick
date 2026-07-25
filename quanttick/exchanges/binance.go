@@ -19,7 +19,7 @@ const (
 	BinanceName                    = "binance"
 	BinanceFuturesName             = "binance-futures"
 	BinanceURL                     = "wss://stream.binance.com:9443/ws"
-	BinanceFuturesURL              = "wss://fstream.binance.com/ws"
+	BinanceFuturesURL              = "wss://fstream.binance.com/market/stream"
 	binanceSubscriptionBufferLimit = 10000
 	binanceSubscriptionRequestID   = 1
 )
@@ -68,7 +68,7 @@ func NewBinanceFutures(symbols []string, options ...BinanceOption) *Binance {
 		Symbols:             append([]string(nil), symbols...),
 		name:                BinanceFuturesName,
 		URL:                 BinanceFuturesURL,
-		stream:              "trade",
+		stream:              "aggTrade",
 		ReconnectDelay:      time.Second,
 		SubscriptionTimeout: websocketSubscriptionTimeout,
 		lastIDs:             make(map[string]int64),
@@ -156,7 +156,11 @@ func (b *Binance) parseTradeMessage(
 	receivedAt time.Time,
 	lastIDs map[string]int64,
 ) (binanceParsedTrade, bool, error) {
-	eventType, ok, err := binanceEventType(data)
+	payload, combinedStream, err := b.unwrapTradeMessage(data)
+	if err != nil {
+		return binanceParsedTrade{}, false, err
+	}
+	eventType, ok, err := binanceEventType(payload)
 	if err != nil {
 		return binanceParsedTrade{}, false, err
 	}
@@ -165,8 +169,18 @@ func (b *Binance) parseTradeMessage(
 	}
 
 	var msg binanceTradeMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
+	if err := json.Unmarshal(payload, &msg); err != nil {
 		return binanceParsedTrade{}, false, fmt.Errorf("parse binance message: %w", err)
+	}
+	if combinedStream != "" {
+		expectedStream := strings.ToLower(msg.Symbol) + "@" + b.stream
+		if combinedStream != expectedStream {
+			return binanceParsedTrade{}, false, fmt.Errorf(
+				"binance combined stream %q does not match trade %q",
+				combinedStream,
+				expectedStream,
+			)
+		}
 	}
 
 	price, err := quanttick.ParseDecimal(msg.Price)
@@ -177,12 +191,15 @@ func (b *Binance) parseTradeMessage(
 	if err != nil {
 		return binanceParsedTrade{}, false, fmt.Errorf("parse binance quantity: %w", err)
 	}
-	buyerIsMaker, err := binanceBuyerIsMaker(data)
+	buyerIsMaker, err := binanceBuyerIsMaker(payload)
 	if err != nil {
 		return binanceParsedTrade{}, false, err
 	}
 
 	tradeID := msg.TradeID
+	if b.stream == "aggTrade" {
+		tradeID = msg.AggregateTradeID
+	}
 	prevID, hadPrevID := lastIDs[msg.Symbol]
 	lastIDs[msg.Symbol] = tradeID
 	tickRule := 1
@@ -202,6 +219,24 @@ func (b *Binance) parseTradeMessage(
 		IsSequential: hadPrevID && tradeID == prevID+1,
 	})
 	return binanceParsedTrade{event: event, tradeID: tradeID}, true, nil
+}
+
+func (b *Binance) unwrapTradeMessage(data []byte) ([]byte, string, error) {
+	if b.name != BinanceFuturesName {
+		return data, "", nil
+	}
+
+	var envelope binanceCombinedStreamMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, "", fmt.Errorf("parse binance message: %w", err)
+	}
+	if envelope.Stream == "" {
+		return data, "", nil
+	}
+	if len(envelope.Data) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
+		return nil, "", fmt.Errorf("binance combined stream %q has no data", envelope.Stream)
+	}
+	return envelope.Data, envelope.Stream, nil
 }
 
 func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
@@ -371,12 +406,18 @@ func parseBinanceSubscriptionResponse(data []byte) (bool, error) {
 	return true, nil
 }
 
+type binanceCombinedStreamMessage struct {
+	Stream string          `json:"stream"`
+	Data   json.RawMessage `json:"data"`
+}
+
 type binanceTradeMessage struct {
-	Symbol    string `json:"s"`
-	TradeID   int64  `json:"t"`
-	TradeTime int64  `json:"T"`
-	Price     string `json:"p"`
-	Quantity  string `json:"q"`
+	Symbol           string `json:"s"`
+	TradeID          int64  `json:"t"`
+	AggregateTradeID int64  `json:"a"`
+	TradeTime        int64  `json:"T"`
+	Price            string `json:"p"`
+	Quantity         string `json:"q"`
 }
 
 func binanceBuyerIsMaker(data []byte) (bool, error) {

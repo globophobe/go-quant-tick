@@ -40,7 +40,7 @@ func TestBinanceFuturesSubscriptionMessages(t *testing.T) {
 	want := []map[string]any{
 		{
 			"method": "SUBSCRIBE",
-			"params": []string{"btcusdt@trade", "ethusdt@trade"},
+			"params": []string{"btcusdt@aggTrade", "ethusdt@aggTrade"},
 			"id":     1,
 		},
 	}
@@ -51,8 +51,8 @@ func TestBinanceFuturesSubscriptionMessages(t *testing.T) {
 	if exchange.Name() != BinanceFuturesName {
 		t.Fatalf("name = %s, want %s", exchange.Name(), BinanceFuturesName)
 	}
-	if exchange.URL != BinanceFuturesURL {
-		t.Fatalf("url = %s, want %s", exchange.URL, BinanceFuturesURL)
+	if exchange.URL != "wss://fstream.binance.com/market/stream" {
+		t.Fatalf("url = %s, want current Binance Futures combined endpoint", exchange.URL)
 	}
 }
 
@@ -102,13 +102,13 @@ func TestBinanceParseTradeMessages(t *testing.T) {
 	}
 }
 
-func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
+func TestBinanceFuturesParseAggregateTradeMessages(t *testing.T) {
 	exchange := NewBinanceFutures([]string{"BTCUSDT"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 	messages := []string{
-		`{"e":"trade","s":"BTCUSDT","t":200,"T":1775606400000,"p":"100","q":"1","m":false}`,
-		`{"e":"trade","s":"BTCUSDT","t":201,"T":1775606401000,"p":"101","q":"2","m":true}`,
-		`{"e":"trade","s":"BTCUSDT","t":203,"T":1775606402000,"p":"102","q":"3","m":false}`,
+		`{"e":"aggTrade","s":"BTCUSDT","a":200,"f":300,"l":302,"T":1775606400000,"p":"100","q":"1","m":false}`,
+		`{"e":"aggTrade","s":"BTCUSDT","a":201,"f":303,"l":303,"T":1775606401000,"p":"101","q":"2","m":true}`,
+		`{"e":"aggTrade","s":"BTCUSDT","a":203,"f":305,"l":307,"T":1775606402000,"p":"102","q":"3","m":false}`,
 	}
 
 	trades := make([]quanttick.TradeEvent, 0, len(messages))
@@ -118,7 +118,7 @@ func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !ok {
-			t.Fatalf("expected futures raw trade message to parse: %s", message)
+			t.Fatalf("expected futures aggregate trade message to parse: %s", message)
 		}
 		trades = append(trades, trade)
 	}
@@ -132,6 +132,40 @@ func TestBinanceFuturesParseRawTradeMessages(t *testing.T) {
 	assertDecimals(t, tradePrices(trades), []string{"100", "101", "102"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1", "2", "3"})
 	assertDecimals(t, tradeVolumes(trades), []string{"100", "202", "306"})
+}
+
+func TestBinanceFuturesParseCombinedAggregateTradeMessage(t *testing.T) {
+	exchange := NewBinanceFutures([]string{"BTCUSDT"})
+	receivedAt := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+
+	trade, ok, err := exchange.ParseTradeMessage(
+		[]byte(`{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":5933014,"p":"100","q":"2","f":100,"l":105,"T":1784937600000,"m":true,"st":1}}`),
+		receivedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected combined aggregate trade message")
+	}
+	if trade.UID != "5933014" || trade.Exchange != BinanceFuturesName || trade.Symbol != "BTCUSDT" {
+		t.Fatalf("trade identity = %#v", trade)
+	}
+	if trade.TickRule != -1 || !trade.Notional.Equal(quanttick.MustDecimal("2")) {
+		t.Fatalf("trade normalization = %#v", trade)
+	}
+}
+
+func TestBinanceFuturesRejectsMismatchedCombinedStream(t *testing.T) {
+	exchange := NewBinanceFutures([]string{"BTCUSDT"})
+
+	_, _, err := exchange.ParseTradeMessage(
+		[]byte(`{"stream":"ethusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":1,"p":"100","q":"1","T":1784937600000,"m":false}}`),
+		time.Now().UTC(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match trade") {
+		t.Fatalf("stream mismatch error = %v", err)
+	}
 }
 
 func TestBinanceParseLiveTradeShape(t *testing.T) {
@@ -190,18 +224,18 @@ func TestBinanceParseIgnoresNonTradeMessages(t *testing.T) {
 	}
 }
 
-func TestBinanceFuturesIgnoresAggregateTradeMessages(t *testing.T) {
+func TestBinanceFuturesIgnoresRawTradeMessages(t *testing.T) {
 	exchange := NewBinanceFutures([]string{"BTCUSDT"})
 
 	trade, ok, err := exchange.ParseTradeMessage(
-		[]byte(`{"e":"aggTrade","s":"BTCUSDT","a":100,"f":100,"l":101,"T":1775606400000,"p":"100","q":"1","m":false}`),
+		[]byte(`{"e":"trade","s":"BTCUSDT","t":100,"T":1775606400000,"p":"100","q":"1","m":false}`),
 		time.Now().UTC(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ok {
-		t.Fatalf("expected aggregate trade message to be ignored, got %#v", trade)
+		t.Fatalf("expected raw trade message to be ignored, got %#v", trade)
 	}
 }
 
