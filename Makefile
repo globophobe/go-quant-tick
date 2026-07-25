@@ -120,12 +120,20 @@ update-binary: upload-artifact
 	@$(load_env); \
 	$(require_project_id); \
 	$(write_service_env); \
-	gcloud compute instances add-metadata "$(INSTANCE)" \
+	if ! gcloud compute instances add-metadata "$(INSTANCE)" \
 		--project "$$project_id" \
 		--zone "$(ZONE)" \
 		--metadata-from-file startup-script="$(STARTUP_SCRIPT)",SERVICE_ENV="$$service_env_file" \
-		--metadata ARTIFACT_PROJECT_ID="$$project_id",ARTIFACT_LOCATION="$(ARTIFACT_LOCATION)",ARTIFACT_REPOSITORY="$(ARTIFACT_REPOSITORY)",ARTIFACT_PACKAGE="$(ARTIFACT_PACKAGE)",ARTIFACT_VERSION="$(ARTIFACT_VERSION)",ARTIFACT_NAME="$(ARTIFACT_NAME)"; \
-	rm -f "$$service_env_file"; \
-	gcloud compute instances reset "$(INSTANCE)" \
+		--metadata ARTIFACT_PROJECT_ID="$$project_id",ARTIFACT_LOCATION="$(ARTIFACT_LOCATION)",ARTIFACT_REPOSITORY="$(ARTIFACT_REPOSITORY)",ARTIFACT_PACKAGE="$(ARTIFACT_PACKAGE)",ARTIFACT_VERSION="$(ARTIFACT_VERSION)",ARTIFACT_NAME="$(ARTIFACT_NAME)"; then \
+		rm -f "$$service_env_file"; \
+		exit 1; \
+	fi; \
+	rm -f "$$service_env_file" && \
+	gcloud compute instances stop "$(INSTANCE)" \
+		--quiet \
+		--project "$$project_id" \
+		--zone "$(ZONE)" && \
+	gcloud compute instances start "$(INSTANCE)" \
+		--quiet \
 		--project "$$project_id" \
 		--zone "$(ZONE)"
