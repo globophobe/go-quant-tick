@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -443,6 +444,79 @@ func TestBinanceTradesReconnectsAfterSubscriptionErrorAndBuffersUntilAck(t *test
 	}
 }
 
+func TestBinanceDiscardedPreAckTradeDoesNotAdvanceSequence(t *testing.T) {
+	var connections atomic.Int32
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+
+		switch connections.Add(1) {
+		case 1:
+			for _, message := range []string{
+				`{"e":"trade","s":"BTCUSDT","t":100,"T":1775606400000,"p":"100","q":"1","m":false}`,
+				`{"code":2,"msg":"Invalid request after trade","id":1}`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			return nil
+		case 2:
+			for _, message := range []string{
+				`{"result":null,"id":1}`,
+				`{"e":"trade","s":"BTCUSDT","t":101,"T":1775606401000,"p":"101","q":"1","m":false}`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			_, _ = readExchangeWebSocketMessage(ctx, conn)
+			return nil
+		default:
+			return fmt.Errorf("unexpected connection")
+		}
+	})
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceURL(url),
+		WithBinanceReconnectDelay(time.Millisecond),
+		WithBinanceSubscriptionTimeout(time.Second),
+	)
+	exchange.lastIDs["BTCUSDT"] = 99
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades, errs := exchange.Trades(ctx)
+
+	select {
+	case err := <-errs:
+		if err == nil || !strings.Contains(err.Error(), "binance websocket error 2") {
+			t.Fatalf("subscription error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for subscription error")
+	}
+
+	select {
+	case trade := <-trades:
+		if trade.UID != "101" {
+			t.Fatalf("trade uid = %s, want 101", trade.UID)
+		}
+		if trade.IsSequential {
+			t.Fatal("trade 101 must expose discarded pre-ack trade 100 as a sequence gap")
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for reconnected trade")
+	}
+
+	cancel()
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
+}
+
 func TestBinanceServerShutdownReconnectsImmediately(t *testing.T) {
 	var connections atomic.Int32
 	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
@@ -482,20 +556,17 @@ func TestBinanceServerShutdownReconnectsImmediately(t *testing.T) {
 	trades, errs := exchange.Trades(ctx)
 
 	select {
-	case err := <-errs:
-		if !errors.Is(err, errBinanceServerShutdown) {
-			t.Fatalf("server shutdown error = %v", err)
-		}
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for server shutdown error")
-	}
-	select {
 	case trade := <-trades:
 		if trade.UID != "200" {
 			t.Fatalf("trade uid = %s, want 200", trade.UID)
 		}
 	case <-ctx.Done():
 		t.Fatal("server shutdown did not trigger an immediate replacement connection")
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("routine server shutdown reached the error channel: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 	cancel()
 	if got := connections.Load(); got != 2 {

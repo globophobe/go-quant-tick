@@ -22,6 +22,15 @@ const (
 
 var _ quanttick.Exchange = (*Bitfinex)(nil)
 
+type bitfinexLifecycleEvent struct {
+	code    int64
+	message string
+}
+
+func (e *bitfinexLifecycleEvent) Error() string {
+	return fmt.Sprintf("bitfinex lifecycle event %d: %s", e.code, e.message)
+}
+
 type Bitfinex struct {
 	Symbols        []string
 	URL            string
@@ -86,7 +95,14 @@ func (b *Bitfinex) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-c
 				if ctx.Err() != nil {
 					return
 				}
-				sendError(ctx, errs, err)
+				var lifecycle *bitfinexLifecycleEvent
+				if errors.As(err, &lifecycle) {
+					if lifecycle.code == 20051 || lifecycle.code == 20061 {
+						continue
+					}
+				} else {
+					sendError(ctx, errs, err)
+				}
 			}
 
 			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
@@ -190,10 +206,20 @@ func (b *Bitfinex) parseEventMessage(data []byte) ([]quanttick.TradeEvent, error
 	case "error":
 		return nil, fmt.Errorf("bitfinex protocol error %d: %s", msg.Code, msg.Message)
 	case "info":
-		if msg.Platform != nil && msg.Platform.Status != 1 {
-			return nil, fmt.Errorf("bitfinex platform unavailable with status %d", msg.Platform.Status)
+		if msg.Platform != nil {
+			switch msg.Platform.Status {
+			case 1:
+			case 0:
+				return nil, &bitfinexLifecycleEvent{code: 20060, message: "platform maintenance"}
+			default:
+				return nil, fmt.Errorf("bitfinex platform unavailable with status %d", msg.Platform.Status)
+			}
 		}
-		if msg.Code != 0 {
+		switch msg.Code {
+		case 0:
+		case 20051, 20060, 20061:
+			return nil, &bitfinexLifecycleEvent{code: msg.Code, message: msg.Message}
+		default:
 			return nil, fmt.Errorf("bitfinex info %d: %s", msg.Code, msg.Message)
 		}
 	case "unsubscribed":

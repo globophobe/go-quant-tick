@@ -2,6 +2,7 @@ package exchanges
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync/atomic"
@@ -227,12 +228,35 @@ func TestBitfinexSubscriptionCompleteness(t *testing.T) {
 	}
 }
 
+func TestBitfinexLifecycleInfoEventsAreRecognized(t *testing.T) {
+	tests := []struct {
+		message string
+		code    int64
+	}{
+		{`{"event":"info","code":20051,"msg":"reconnect"}`, 20051},
+		{`{"event":"info","code":20060,"msg":"maintenance started"}`, 20060},
+		{`{"event":"info","code":20061,"msg":"maintenance ended"}`, 20061},
+		{`{"event":"info","platform":{"status":0}}`, 20060},
+	}
+
+	for _, test := range tests {
+		exchange := NewBitfinex([]string{"BTCUSD"})
+		_, err := exchange.ParseTradeMessage([]byte(test.message), time.Now().UTC())
+		var lifecycle *bitfinexLifecycleEvent
+		if !errors.As(err, &lifecycle) {
+			t.Fatalf("message %s error = %v, want lifecycle event", test.message, err)
+		}
+		if lifecycle.code != test.code {
+			t.Fatalf("message %s lifecycle code = %d, want %d", test.message, lifecycle.code, test.code)
+		}
+	}
+}
+
 func TestBitfinexProtocolFailuresSurface(t *testing.T) {
 	exchange := NewBitfinex([]string{"BTCUSD"})
 	messages := []string{
 		`{"event":"error","code":10001,"msg":"unknown pair"}`,
-		`{"event":"info","code":20051,"msg":"reconnect"}`,
-		`{"event":"info","platform":{"status":0}}`,
+		`{"event":"info","code":29999,"msg":"unknown info"}`,
 		`{"event":"subscribed","channel":"book","chanId":1,"symbol":"tBTCUSD"}`,
 		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tETHUSD"}`,
 	}
@@ -247,6 +271,73 @@ func TestBitfinexProtocolFailuresSurface(t *testing.T) {
 		time.Now().UTC(),
 	); err != nil {
 		t.Fatalf("operative info message should be accepted: %v", err)
+	}
+}
+
+func TestBitfinexLifecycleRestartReconnectsWithoutError(t *testing.T) {
+	var connections atomic.Int32
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		connection := connections.Add(1)
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return fmt.Errorf("read subscription on connection %d: %w", connection, err)
+		}
+
+		switch connection {
+		case 1:
+			for _, message := range []string{
+				`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
+				`{"event":"info","code":20051,"msg":"reconnect"}`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			return nil
+		case 2:
+			for _, message := range []string{
+				`{"event":"subscribed","channel":"trades","chanId":2,"symbol":"tBTCUSD"}`,
+				`[2,"te",[101,1775557141000,1,101]]`,
+				`[2,"tu",[101,1775557141001,1,101]]`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			_, _ = readExchangeWebSocketMessage(ctx, conn)
+			return nil
+		default:
+			return fmt.Errorf("unexpected connection %d", connection)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	exchange := NewBitfinex(
+		[]string{"BTCUSD"},
+		WithBitfinexURL(url),
+		WithBitfinexReconnectDelay(5*time.Second),
+	)
+	trades, errs := exchange.Trades(ctx)
+
+	select {
+	case trade := <-trades:
+		if trade.UID != "101" {
+			t.Fatalf("trade uid = %s, want 101", trade.UID)
+		}
+	case err := <-errs:
+		t.Fatalf("routine restart reached the error channel: %v", err)
+	case <-ctx.Done():
+		t.Fatal("routine restart did not trigger an immediate replacement connection")
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("routine restart reached the error channel: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancel()
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
 	}
 }
 

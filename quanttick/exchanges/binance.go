@@ -40,6 +40,11 @@ type Binance struct {
 	lastIDs map[string]int64
 }
 
+type binanceParsedTrade struct {
+	event   quanttick.TradeEvent
+	tradeID int64
+}
+
 type BinanceOption func(*Binance)
 
 func NewBinance(symbols []string, options ...BinanceOption) *Binance {
@@ -111,10 +116,10 @@ func (b *Binance) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-ch
 				if ctx.Err() != nil {
 					return
 				}
-				sendError(ctx, errs, err)
 				if errors.Is(err, errBinanceServerShutdown) {
 					continue
 				}
+				sendError(ctx, errs, err)
 			}
 
 			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
@@ -142,41 +147,50 @@ func (b *Binance) SubscriptionMessages() []map[string]any {
 }
 
 func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttick.TradeEvent, bool, error) {
+	parsed, ok, err := b.parseTradeMessage(data, receivedAt, b.lastIDs)
+	return parsed.event, ok, err
+}
+
+func (b *Binance) parseTradeMessage(
+	data []byte,
+	receivedAt time.Time,
+	lastIDs map[string]int64,
+) (binanceParsedTrade, bool, error) {
 	eventType, ok, err := binanceEventType(data)
 	if err != nil {
-		return quanttick.TradeEvent{}, false, err
+		return binanceParsedTrade{}, false, err
 	}
 	if !ok || eventType != b.stream {
-		return quanttick.TradeEvent{}, false, nil
+		return binanceParsedTrade{}, false, nil
 	}
 
 	var msg binanceTradeMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return quanttick.TradeEvent{}, false, fmt.Errorf("parse binance message: %w", err)
+		return binanceParsedTrade{}, false, fmt.Errorf("parse binance message: %w", err)
 	}
 
 	price, err := quanttick.ParseDecimal(msg.Price)
 	if err != nil {
-		return quanttick.TradeEvent{}, false, fmt.Errorf("parse binance price: %w", err)
+		return binanceParsedTrade{}, false, fmt.Errorf("parse binance price: %w", err)
 	}
 	notional, err := quanttick.ParseDecimal(msg.Quantity)
 	if err != nil {
-		return quanttick.TradeEvent{}, false, fmt.Errorf("parse binance quantity: %w", err)
+		return binanceParsedTrade{}, false, fmt.Errorf("parse binance quantity: %w", err)
 	}
 	buyerIsMaker, err := binanceBuyerIsMaker(data)
 	if err != nil {
-		return quanttick.TradeEvent{}, false, err
+		return binanceParsedTrade{}, false, err
 	}
 
 	tradeID := msg.TradeID
-	prevID, hadPrevID := b.lastIDs[msg.Symbol]
-	b.lastIDs[msg.Symbol] = tradeID
+	prevID, hadPrevID := lastIDs[msg.Symbol]
+	lastIDs[msg.Symbol] = tradeID
 	tickRule := 1
 	if buyerIsMaker {
 		tickRule = -1
 	}
 
-	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
+	event := quanttick.NewTradeEvent(quanttick.TradeEventInput{
 		Exchange:     b.name,
 		UID:          strconv.FormatInt(tradeID, 10),
 		Symbol:       msg.Symbol,
@@ -186,7 +200,8 @@ func (b *Binance) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttic
 		Notional:     notional,
 		TickRule:     tickRule,
 		IsSequential: hadPrevID && tradeID == prevID+1,
-	}), true, nil
+	})
+	return binanceParsedTrade{event: event, tradeID: tradeID}, true, nil
 }
 
 func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
@@ -207,13 +222,15 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 		}
 	}
 
-	buffered, err := b.awaitSubscription(ctx, conn)
+	sequenceIDs := cloneBinanceLastIDs(b.lastIDs)
+	buffered, err := b.awaitSubscription(ctx, conn, sequenceIDs)
 	if err != nil {
 		return err
 	}
-	for _, trade := range buffered {
+	for _, parsed := range buffered {
 		select {
-		case trades <- trade:
+		case trades <- parsed.event:
+			b.lastIDs[parsed.event.Symbol] = parsed.tradeID
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -239,7 +256,7 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 			continue
 		}
 
-		trade, ok, err := b.ParseTradeMessage(data, time.Now().UTC())
+		parsed, ok, err := b.parseTradeMessage(data, time.Now().UTC(), sequenceIDs)
 		if err != nil {
 			return err
 		}
@@ -248,18 +265,23 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 		}
 
 		select {
-		case trades <- trade:
+		case trades <- parsed.event:
+			b.lastIDs[parsed.event.Symbol] = parsed.tradeID
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-func (b *Binance) awaitSubscription(ctx context.Context, conn *websocket.Conn) ([]quanttick.TradeEvent, error) {
+func (b *Binance) awaitSubscription(
+	ctx context.Context,
+	conn *websocket.Conn,
+	sequenceIDs map[string]int64,
+) ([]binanceParsedTrade, error) {
 	ackCtx, cancel := context.WithTimeout(ctx, b.SubscriptionTimeout)
 	defer cancel()
 
-	buffered := make([]quanttick.TradeEvent, 0)
+	buffered := make([]binanceParsedTrade, 0)
 	for {
 		messageType, data, err := conn.Read(ackCtx)
 		if err != nil {
@@ -283,7 +305,7 @@ func (b *Binance) awaitSubscription(ctx context.Context, conn *websocket.Conn) (
 			return buffered, nil
 		}
 
-		trade, ok, err := b.ParseTradeMessage(data, time.Now().UTC())
+		parsed, ok, err := b.parseTradeMessage(data, time.Now().UTC(), sequenceIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -293,8 +315,16 @@ func (b *Binance) awaitSubscription(ctx context.Context, conn *websocket.Conn) (
 		if len(buffered) >= binanceSubscriptionBufferLimit {
 			return nil, fmt.Errorf("binance subscription trade buffer exceeded %d events", binanceSubscriptionBufferLimit)
 		}
-		buffered = append(buffered, trade)
+		buffered = append(buffered, parsed)
 	}
+}
+
+func cloneBinanceLastIDs(lastIDs map[string]int64) map[string]int64 {
+	cloned := make(map[string]int64, len(lastIDs))
+	for symbol, tradeID := range lastIDs {
+		cloned[symbol] = tradeID
+	}
+	return cloned
 }
 
 func parseBinanceSubscriptionResponse(data []byte) (bool, error) {
