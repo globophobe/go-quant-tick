@@ -1,6 +1,7 @@
 package exchanges
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,20 +16,26 @@ import (
 )
 
 const (
-	BinanceName        = "binance"
-	BinanceFuturesName = "binance-futures"
-	BinanceURL         = "wss://stream.binance.com:9443/ws"
-	BinanceFuturesURL  = "wss://fstream.binance.com/ws"
+	BinanceName                    = "binance"
+	BinanceFuturesName             = "binance-futures"
+	BinanceURL                     = "wss://stream.binance.com:9443/ws"
+	BinanceFuturesURL              = "wss://fstream.binance.com/ws"
+	binanceSubscriptionBufferLimit = 10000
+	binanceSubscriptionRequestID   = 1
 )
 
-var _ quanttick.Exchange = (*Binance)(nil)
+var (
+	_                        quanttick.Exchange = (*Binance)(nil)
+	errBinanceServerShutdown                    = errors.New("binance server shutdown")
+)
 
 type Binance struct {
-	Symbols        []string
-	name           string
-	URL            string
-	stream         string
-	ReconnectDelay time.Duration
+	Symbols             []string
+	name                string
+	URL                 string
+	stream              string
+	ReconnectDelay      time.Duration
+	SubscriptionTimeout time.Duration
 
 	lastIDs map[string]int64
 }
@@ -37,12 +44,13 @@ type BinanceOption func(*Binance)
 
 func NewBinance(symbols []string, options ...BinanceOption) *Binance {
 	exchange := &Binance{
-		Symbols:        append([]string(nil), symbols...),
-		name:           BinanceName,
-		URL:            BinanceURL,
-		stream:         "trade",
-		ReconnectDelay: time.Second,
-		lastIDs:        make(map[string]int64),
+		Symbols:             append([]string(nil), symbols...),
+		name:                BinanceName,
+		URL:                 BinanceURL,
+		stream:              "trade",
+		ReconnectDelay:      time.Second,
+		SubscriptionTimeout: websocketSubscriptionTimeout,
+		lastIDs:             make(map[string]int64),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -52,12 +60,13 @@ func NewBinance(symbols []string, options ...BinanceOption) *Binance {
 
 func NewBinanceFutures(symbols []string, options ...BinanceOption) *Binance {
 	exchange := &Binance{
-		Symbols:        append([]string(nil), symbols...),
-		name:           BinanceFuturesName,
-		URL:            BinanceFuturesURL,
-		stream:         "trade",
-		ReconnectDelay: time.Second,
-		lastIDs:        make(map[string]int64),
+		Symbols:             append([]string(nil), symbols...),
+		name:                BinanceFuturesName,
+		URL:                 BinanceFuturesURL,
+		stream:              "trade",
+		ReconnectDelay:      time.Second,
+		SubscriptionTimeout: websocketSubscriptionTimeout,
+		lastIDs:             make(map[string]int64),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -77,6 +86,12 @@ func WithBinanceReconnectDelay(delay time.Duration) BinanceOption {
 	}
 }
 
+func WithBinanceSubscriptionTimeout(timeout time.Duration) BinanceOption {
+	return func(exchange *Binance) {
+		exchange.SubscriptionTimeout = timeout
+	}
+}
+
 func (b *Binance) Name() string {
 	return b.name
 }
@@ -88,16 +103,21 @@ func (b *Binance) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-ch
 	go func() {
 		defer close(trades)
 		defer close(errs)
+		backoff := newReconnectBackoff(b.ReconnectDelay)
 
 		for {
+			startedAt := time.Now()
 			if err := b.run(ctx, trades); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if ctx.Err() != nil {
 					return
 				}
 				sendError(ctx, errs, err)
+				if errors.Is(err, errBinanceServerShutdown) {
+					continue
+				}
 			}
 
-			if err := sleepContext(ctx, b.ReconnectDelay); err != nil {
+			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
 				return
 			}
 		}
@@ -116,7 +136,7 @@ func (b *Binance) SubscriptionMessages() []map[string]any {
 		{
 			"method": "SUBSCRIBE",
 			"params": params,
-			"id":     1,
+			"id":     binanceSubscriptionRequestID,
 		},
 	}
 }
@@ -187,6 +207,18 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 		}
 	}
 
+	buffered, err := b.awaitSubscription(ctx, conn)
+	if err != nil {
+		return err
+	}
+	for _, trade := range buffered {
+		select {
+		case trades <- trade:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	for {
 		messageType, data, err := conn.Read(ctx)
 		if err != nil {
@@ -196,6 +228,14 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 			return fmt.Errorf("read binance websocket: %w", err)
 		}
 		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
+			continue
+		}
+
+		isAck, err := parseBinanceSubscriptionResponse(data)
+		if err != nil {
+			return err
+		}
+		if isAck {
 			continue
 		}
 
@@ -213,6 +253,92 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 			return ctx.Err()
 		}
 	}
+}
+
+func (b *Binance) awaitSubscription(ctx context.Context, conn *websocket.Conn) ([]quanttick.TradeEvent, error) {
+	ackCtx, cancel := context.WithTimeout(ctx, b.SubscriptionTimeout)
+	defer cancel()
+
+	buffered := make([]quanttick.TradeEvent, 0)
+	for {
+		messageType, data, err := conn.Read(ackCtx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if ackCtx.Err() != nil {
+				return nil, fmt.Errorf("binance subscription acknowledgement timed out after %s", b.SubscriptionTimeout)
+			}
+			return nil, fmt.Errorf("read binance subscription acknowledgement: %w", err)
+		}
+		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
+			continue
+		}
+
+		isAck, err := parseBinanceSubscriptionResponse(data)
+		if err != nil {
+			return nil, err
+		}
+		if isAck {
+			return buffered, nil
+		}
+
+		trade, ok, err := b.ParseTradeMessage(data, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if len(buffered) >= binanceSubscriptionBufferLimit {
+			return nil, fmt.Errorf("binance subscription trade buffer exceeded %d events", binanceSubscriptionBufferLimit)
+		}
+		buffered = append(buffered, trade)
+	}
+}
+
+func parseBinanceSubscriptionResponse(data []byte) (bool, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return false, fmt.Errorf("parse binance message: %w", err)
+	}
+
+	if rawEvent, ok := envelope["e"]; ok && bytes.Equal(bytes.TrimSpace(rawEvent), []byte(`"serverShutdown"`)) {
+		return false, errBinanceServerShutdown
+	}
+
+	if rawCode, ok := envelope["code"]; ok {
+		var code int
+		if err := json.Unmarshal(rawCode, &code); err != nil {
+			return false, fmt.Errorf("parse binance websocket error code: %w", err)
+		}
+		var message string
+		if rawMessage, ok := envelope["msg"]; ok {
+			_ = json.Unmarshal(rawMessage, &message)
+		}
+		return false, fmt.Errorf("binance websocket error %d: %s", code, message)
+	}
+
+	rawResult, hasResult := envelope["result"]
+	rawID, hasID := envelope["id"]
+	if !hasResult && !hasID {
+		return false, nil
+	}
+	if !hasResult || !hasID {
+		return false, fmt.Errorf("invalid binance subscription response: %s", string(data))
+	}
+
+	var id int64
+	if err := json.Unmarshal(rawID, &id); err != nil {
+		return false, fmt.Errorf("parse binance subscription response id: %w", err)
+	}
+	if id != binanceSubscriptionRequestID {
+		return false, fmt.Errorf("binance subscription response has unexpected id %d", id)
+	}
+	if string(bytes.TrimSpace(rawResult)) != "null" {
+		return false, fmt.Errorf("binance subscription request failed: %s", string(data))
+	}
+	return true, nil
 }
 
 type binanceTradeMessage struct {

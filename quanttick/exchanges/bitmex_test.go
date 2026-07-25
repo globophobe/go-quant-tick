@@ -1,9 +1,13 @@
 package exchanges
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
@@ -263,4 +267,166 @@ func bitmexTestTrade(uid string, timestamp time.Time) quanttick.TradeEvent {
 		TickRule:     1,
 		IsSequential: true,
 	})
+}
+
+func TestBitmexRunWaitsForAcksAndPartialsAndDropsPrePartialInserts(t *testing.T) {
+	preReadyMessagesSent := make(chan struct{})
+	sendFinalReadiness := make(chan struct{})
+
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		messages := []string{
+			`{"success":true,"subscribe":"trade:XBTUSD","request":{"op":"subscribe","args":["trade:XBTUSD","trade:ETHUSD"]}}`,
+			`{"table":"trade","action":"insert","data":[{"trdMatchID":"drop-before-partial","symbol":"XBTUSD","timestamp":"2026-04-08T00:00:00Z","side":"Buy","price":100,"homeNotional":1}]}`,
+			`{"table":"trade","action":"partial","filter":{"symbol":"XBTUSD"},"data":[{"trdMatchID":"xbt-snapshot","symbol":"XBTUSD","timestamp":"2026-04-08T00:00:01Z","side":"Buy","price":100,"homeNotional":1}]}`,
+			`{"table":"trade","action":"insert","data":[{"trdMatchID":"xbt-after-partial","symbol":"XBTUSD","timestamp":"2026-04-08T00:00:02Z","side":"Buy","price":100,"homeNotional":1}]}`,
+		}
+		for _, message := range messages {
+			if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+				return err
+			}
+		}
+		close(preReadyMessagesSent)
+		select {
+		case <-sendFinalReadiness:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			`{"success":true,"subscribe":"trade:ETHUSD","request":{"op":"subscribe","args":["trade:XBTUSD","trade:ETHUSD"]}}`,
+		); err != nil {
+			return err
+		}
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			`{"table":"trade","action":"partial","filter":{"symbol":"ETHUSD"},"data":[{"trdMatchID":"eth-snapshot","symbol":"ETHUSD","timestamp":"2026-04-08T00:00:03Z","side":"Sell","price":100,"homeNotional":1}]}`,
+		); err != nil {
+			return err
+		}
+		return conn.Close(websocket.StatusNormalClosure, "")
+	})
+
+	exchange := NewBitmex(
+		[]string{"XBTUSD", "ETHUSD"},
+		WithBitmexURL(url),
+		WithBitmexSubscriptionTimeout(time.Second),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades := make(chan quanttick.TradeEvent, 3)
+	done := make(chan error, 1)
+	go func() {
+		done <- exchange.run(ctx, trades, newBitmexSeenTrades(bitmexSeenTradeLimit))
+	}()
+
+	select {
+	case <-preReadyMessagesSent:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for pre-readiness messages")
+	}
+	select {
+	case trade := <-trades:
+		t.Fatalf("trade emitted before all acknowledgements and partials: %#v", trade)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(sendFinalReadiness)
+
+	gotUIDs := make([]string, 0, 3)
+	for len(gotUIDs) < 3 {
+		select {
+		case trade := <-trades:
+			gotUIDs = append(gotUIDs, trade.UID)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for ready trades")
+		}
+	}
+	wantUIDs := []string{"xbt-snapshot", "xbt-after-partial", "eth-snapshot"}
+	if !reflect.DeepEqual(gotUIDs, wantUIDs) {
+		t.Fatalf("trade uids = %#v, want %#v", gotUIDs, wantUIDs)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("bitmex run did not finish")
+	}
+}
+
+func TestBitmexSubscriptionReadinessRequiresAckAndPartial(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []string
+		want     string
+	}{
+		{
+			name: "ack without partial",
+			messages: []string{
+				`{"success":true,"subscribe":"trade:XBTUSD","request":{"op":"subscribe","args":["trade:XBTUSD"]}}`,
+			},
+			want: "missing partial snapshots: XBTUSD",
+		},
+		{
+			name: "partial without ack",
+			messages: []string{
+				`{"table":"trade","action":"partial","filter":{"symbol":"XBTUSD"},"data":[]}`,
+			},
+			want: "missing acknowledgements: XBTUSD",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				for _, message := range tc.messages {
+					if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+						return err
+					}
+				}
+				_, _ = readExchangeWebSocketMessage(ctx, conn)
+				return nil
+			})
+
+			exchange := NewBitmex(
+				[]string{"XBTUSD"},
+				WithBitmexURL(url),
+				WithBitmexSubscriptionTimeout(30*time.Millisecond),
+			)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := exchange.run(ctx, make(chan quanttick.TradeEvent, 1), newBitmexSeenTrades(bitmexSeenTradeLimit))
+			if err == nil || !strings.Contains(err.Error(), "subscription readiness timed out") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("readiness error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseBitmexSubscriptionResponseRejectsProtocolError(t *testing.T) {
+	_, _, err := parseBitmexSubscriptionResponse(
+		[]byte(`{"status":429,"error":"Rate limit exceeded","request":{"op":"subscribe","args":"trade:XBTUSD"}}`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "Rate limit exceeded") {
+		t.Fatalf("protocol error = %v", err)
+	}
+}
+
+func TestBitmexRejectsNonPositivePrice(t *testing.T) {
+	exchange := NewBitmex([]string{"XBTUSD"})
+	_, err := exchange.ParseTradeMessage(
+		[]byte(`{"table":"trade","action":"insert","data":[{"trdMatchID":"a","symbol":"XBTUSD","timestamp":"2026-04-08T00:00:00Z","side":"Buy","price":0,"foreignNotional":1}]}`),
+		time.Now().UTC(),
+	)
+	if err == nil {
+		t.Fatal("zero price should fail instead of dividing by zero")
+	}
 }

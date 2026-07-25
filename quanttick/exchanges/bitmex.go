@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -16,26 +15,29 @@ import (
 )
 
 const (
-	BitmexName           = "bitmex"
-	BitmexURL            = "wss://ws.bitmex.com/realtime"
-	bitmexSeenTradeLimit = 10000
+	BitmexName                    = "bitmex"
+	BitmexURL                     = "wss://ws.bitmex.com/realtime"
+	bitmexSeenTradeLimit          = 10000
+	bitmexSubscriptionBufferLimit = 10000
 )
 
 var _ quanttick.Exchange = (*Bitmex)(nil)
 
 type Bitmex struct {
-	Symbols        []string
-	URL            string
-	ReconnectDelay time.Duration
+	Symbols             []string
+	URL                 string
+	ReconnectDelay      time.Duration
+	SubscriptionTimeout time.Duration
 }
 
 type BitmexOption func(*Bitmex)
 
 func NewBitmex(symbols []string, options ...BitmexOption) *Bitmex {
 	exchange := &Bitmex{
-		Symbols:        append([]string(nil), symbols...),
-		URL:            BitmexURL,
-		ReconnectDelay: time.Second,
+		Symbols:             append([]string(nil), symbols...),
+		URL:                 BitmexURL,
+		ReconnectDelay:      time.Second,
+		SubscriptionTimeout: websocketSubscriptionTimeout,
 	}
 	for _, option := range options {
 		option(exchange)
@@ -55,6 +57,12 @@ func WithBitmexReconnectDelay(delay time.Duration) BitmexOption {
 	}
 }
 
+func WithBitmexSubscriptionTimeout(timeout time.Duration) BitmexOption {
+	return func(exchange *Bitmex) {
+		exchange.SubscriptionTimeout = timeout
+	}
+}
+
 func (b *Bitmex) Name() string {
 	return BitmexName
 }
@@ -67,16 +75,18 @@ func (b *Bitmex) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-cha
 	go func() {
 		defer close(trades)
 		defer close(errs)
+		backoff := newReconnectBackoff(b.ReconnectDelay)
 
 		for {
+			startedAt := time.Now()
 			if err := b.run(ctx, trades, seen); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if ctx.Err() != nil {
 					return
 				}
 				sendError(ctx, errs, err)
 			}
 
-			if err := sleepContext(ctx, b.ReconnectDelay); err != nil {
+			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
 				return
 			}
 		}
@@ -104,6 +114,10 @@ func (b *Bitmex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quantti
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("parse bitmex message: %w", err)
 	}
+	return bitmexTradesFromMessage(msg, receivedAt)
+}
+
+func bitmexTradesFromMessage(msg bitmexTradeMessage, receivedAt time.Time) ([]quanttick.TradeEvent, error) {
 	if msg.Table != "trade" || (msg.Action != "insert" && msg.Action != "partial") {
 		return nil, nil
 	}
@@ -174,6 +188,21 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent, se
 		}
 	}
 
+	buffered, err := b.awaitSubscriptions(ctx, conn)
+	if err != nil {
+		return err
+	}
+	for _, trade := range buffered {
+		if !seen.Add(trade) {
+			continue
+		}
+		select {
+		case trades <- trade:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	for {
 		messageType, data, err := conn.Read(ctx)
 		if err != nil {
@@ -183,6 +212,14 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent, se
 			return fmt.Errorf("read bitmex websocket: %w", err)
 		}
 		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
+			continue
+		}
+
+		_, isAck, err := parseBitmexSubscriptionResponse(data)
+		if err != nil {
+			return err
+		}
+		if isAck {
 			continue
 		}
 
@@ -203,10 +240,197 @@ func (b *Bitmex) run(ctx context.Context, trades chan<- quanttick.TradeEvent, se
 	}
 }
 
+func (b *Bitmex) awaitSubscriptions(ctx context.Context, conn *websocket.Conn) ([]quanttick.TradeEvent, error) {
+	expectedTopics := make(map[string]string, len(b.Symbols))
+	expectedSymbols := make(map[string]struct{}, len(b.Symbols))
+	for _, symbol := range b.Symbols {
+		expectedTopics["trade:"+symbol] = symbol
+		expectedSymbols[symbol] = struct{}{}
+	}
+	if len(expectedSymbols) == 0 {
+		return nil, nil
+	}
+
+	ackCtx, cancel := context.WithTimeout(ctx, b.SubscriptionTimeout)
+	defer cancel()
+
+	acked := make(map[string]struct{}, len(expectedSymbols))
+	partials := make(map[string]struct{}, len(expectedSymbols))
+	buffered := make([]quanttick.TradeEvent, 0)
+	for len(acked) < len(expectedSymbols) || len(partials) < len(expectedSymbols) {
+		messageType, data, err := conn.Read(ackCtx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if ackCtx.Err() != nil {
+				return nil, fmt.Errorf(
+					"bitmex subscription readiness timed out after %s (missing acknowledgements: %s; missing partial snapshots: %s)",
+					b.SubscriptionTimeout,
+					strings.Join(missingBitmexSymbols(expectedSymbols, acked), ","),
+					strings.Join(missingBitmexSymbols(expectedSymbols, partials), ","),
+				)
+			}
+			return nil, fmt.Errorf("read bitmex subscription readiness: %w", err)
+		}
+		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
+			continue
+		}
+
+		topic, isAck, err := parseBitmexSubscriptionResponse(data)
+		if err != nil {
+			return nil, err
+		}
+		if isAck {
+			symbol, ok := expectedTopics[topic]
+			if !ok {
+				return nil, fmt.Errorf("bitmex acknowledged unexpected subscription %q", topic)
+			}
+			acked[symbol] = struct{}{}
+			continue
+		}
+
+		var msg bitmexTradeMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return nil, fmt.Errorf("parse bitmex message: %w", err)
+		}
+		if msg.Table != "trade" {
+			continue
+		}
+
+		var parsedTrades []quanttick.TradeEvent
+		switch msg.Action {
+		case "partial":
+			partialSymbols, err := bitmexPartialSymbols(msg, expectedSymbols, partials)
+			if err != nil {
+				return nil, err
+			}
+			parsedTrades, err = bitmexTradesFromMessage(msg, time.Now().UTC())
+			if err != nil {
+				return nil, err
+			}
+			for _, symbol := range partialSymbols {
+				partials[symbol] = struct{}{}
+			}
+		case "insert":
+			readyData := make([]bitmexTradeEntry, 0, len(msg.Data))
+			for _, trade := range msg.Data {
+				if _, ok := expectedSymbols[trade.Symbol]; !ok {
+					return nil, fmt.Errorf("bitmex received trade for unexpected symbol %q", trade.Symbol)
+				}
+				if _, ready := partials[trade.Symbol]; ready {
+					readyData = append(readyData, trade)
+				}
+			}
+			if len(readyData) == 0 {
+				continue
+			}
+			msg.Data = readyData
+			parsedTrades, err = bitmexTradesFromMessage(msg, time.Now().UTC())
+			if err != nil {
+				return nil, err
+			}
+		default:
+			continue
+		}
+		if len(buffered)+len(parsedTrades) > bitmexSubscriptionBufferLimit {
+			return nil, fmt.Errorf("bitmex subscription trade buffer exceeded %d events", bitmexSubscriptionBufferLimit)
+		}
+		buffered = append(buffered, parsedTrades...)
+	}
+	return buffered, nil
+}
+
+func bitmexPartialSymbols(
+	msg bitmexTradeMessage,
+	expected map[string]struct{},
+	ready map[string]struct{},
+) ([]string, error) {
+	symbols := make(map[string]struct{})
+	if msg.Filter.Symbol != "" {
+		symbols[msg.Filter.Symbol] = struct{}{}
+	}
+	for _, trade := range msg.Data {
+		if trade.Symbol == "" {
+			return nil, fmt.Errorf("bitmex partial snapshot contains an empty symbol")
+		}
+		if msg.Filter.Symbol != "" && trade.Symbol != msg.Filter.Symbol {
+			return nil, fmt.Errorf(
+				"bitmex partial snapshot filter %q contains symbol %q",
+				msg.Filter.Symbol,
+				trade.Symbol,
+			)
+		}
+		symbols[trade.Symbol] = struct{}{}
+	}
+
+	if len(symbols) == 0 {
+		for symbol := range expected {
+			if _, ok := ready[symbol]; !ok {
+				symbols[symbol] = struct{}{}
+			}
+		}
+		if len(symbols) != 1 {
+			return nil, fmt.Errorf("bitmex empty partial snapshot is missing a symbol filter")
+		}
+	}
+
+	result := make([]string, 0, len(symbols))
+	for symbol := range symbols {
+		if _, ok := expected[symbol]; !ok {
+			return nil, fmt.Errorf("bitmex received partial snapshot for unexpected symbol %q", symbol)
+		}
+		result = append(result, symbol)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func missingBitmexSymbols(expected, actual map[string]struct{}) []string {
+	missing := make([]string, 0, len(expected)-len(actual))
+	for symbol := range expected {
+		if _, ok := actual[symbol]; !ok {
+			missing = append(missing, symbol)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func parseBitmexSubscriptionResponse(data []byte) (string, bool, error) {
+	var response bitmexSubscriptionResponse
+	if err := json.Unmarshal(data, &response); err != nil {
+		return "", false, fmt.Errorf("parse bitmex message: %w", err)
+	}
+	if response.Error != "" {
+		if response.Status != 0 {
+			return "", false, fmt.Errorf("bitmex websocket error %d: %s", response.Status, response.Error)
+		}
+		return "", false, fmt.Errorf("bitmex websocket error: %s", response.Error)
+	}
+	if response.Success == nil {
+		return "", false, nil
+	}
+	if !*response.Success || response.Subscribe == "" {
+		return "", false, fmt.Errorf("invalid bitmex subscription response: %s", string(data))
+	}
+	return response.Subscribe, true, nil
+}
+
+type bitmexSubscriptionResponse struct {
+	Success   *bool  `json:"success"`
+	Subscribe string `json:"subscribe"`
+	Error     string `json:"error"`
+	Status    int    `json:"status"`
+}
+
 type bitmexTradeMessage struct {
-	Table  string             `json:"table"`
-	Action string             `json:"action"`
-	Data   []bitmexTradeEntry `json:"data"`
+	Table  string `json:"table"`
+	Action string `json:"action"`
+	Filter struct {
+		Symbol string `json:"symbol"`
+	} `json:"filter"`
+	Data []bitmexTradeEntry `json:"data"`
 }
 
 type bitmexTradeEntry struct {
@@ -248,6 +472,9 @@ func (s *bitmexSeenTrades) Add(trade quanttick.TradeEvent) bool {
 }
 
 func parseBitmexVolumeAndNotional(rawTrade bitmexTradeEntry, price quanttick.Decimal) (quanttick.Decimal, quanttick.Decimal, error) {
+	if !price.IsPositive() {
+		return quanttick.Decimal{}, quanttick.Decimal{}, fmt.Errorf("invalid bitmex price %s", price)
+	}
 	if len(rawTrade.ForeignNotional) != 0 && !bytes.Equal(rawTrade.ForeignNotional, []byte("null")) {
 		volume, err := parseRawDecimal(rawTrade.ForeignNotional)
 		if err != nil {

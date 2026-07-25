@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	CoinbaseName = "coinbase"
-	CoinbaseURL  = "wss://ws-feed.exchange.coinbase.com"
+	CoinbaseName           = "coinbase"
+	CoinbaseURL            = "wss://ws-feed.exchange.coinbase.com"
+	coinbaseSeenTradeLimit = 10000
 )
 
 var _ quanttick.Exchange = (*Coinbase)(nil)
@@ -26,7 +27,9 @@ type Coinbase struct {
 	URL            string
 	ReconnectDelay time.Duration
 
-	lastIDs map[string]int64
+	lastIDs    map[string]int64
+	seen       *seenTradeIDs
+	subscribed bool
 }
 
 type CoinbaseOption func(*Coinbase)
@@ -37,6 +40,7 @@ func NewCoinbase(symbols []string, options ...CoinbaseOption) *Coinbase {
 		URL:            CoinbaseURL,
 		ReconnectDelay: time.Second,
 		lastIDs:        make(map[string]int64),
+		seen:           newSeenTradeIDs(coinbaseSeenTradeLimit),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -67,16 +71,18 @@ func (c *Coinbase) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-c
 	go func() {
 		defer close(trades)
 		defer close(errs)
+		backoff := newReconnectBackoff(c.ReconnectDelay)
 
 		for {
+			startedAt := time.Now()
 			if err := c.run(ctx, trades); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if ctx.Err() != nil {
 					return
 				}
 				sendError(ctx, errs, err)
 			}
 
-			if err := sleepContext(ctx, c.ReconnectDelay); err != nil {
+			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
 				return
 			}
 		}
@@ -96,6 +102,11 @@ func (c *Coinbase) SubscriptionMessages() []map[string]any {
 }
 
 func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quanttick.TradeEvent, bool, error) {
+	handled, err := c.parseControlMessage(data)
+	if err != nil || handled {
+		return quanttick.TradeEvent{}, false, err
+	}
+
 	msg, ok, err := parseCoinbaseMatchMessage(data)
 	if err != nil || !ok {
 		return quanttick.TradeEvent{}, ok, err
@@ -106,8 +117,18 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 		return quanttick.TradeEvent{}, false, err
 	}
 
+	uid := strconv.FormatInt(msg.TradeID, 10)
+	if c.seen == nil {
+		c.seen = newSeenTradeIDs(coinbaseSeenTradeLimit)
+	}
+	if !c.seen.Add(msg.ProductID, uid) {
+		return quanttick.TradeEvent{}, false, nil
+	}
+
 	prevID, hadPrevID := c.lastIDs[msg.ProductID]
-	c.lastIDs[msg.ProductID] = msg.TradeID
+	if !hadPrevID || msg.TradeID > prevID {
+		c.lastIDs[msg.ProductID] = msg.TradeID
+	}
 	tickRule := -1
 	if strings.ToLower(msg.Side) == "sell" {
 		tickRule = 1
@@ -115,7 +136,7 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 
 	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
 		Exchange:     CoinbaseName,
-		UID:          strconv.FormatInt(msg.TradeID, 10),
+		UID:          uid,
 		Symbol:       msg.ProductID,
 		Timestamp:    timestamp,
 		Nanoseconds:  nanoseconds,
@@ -125,6 +146,65 @@ func (c *Coinbase) ParseTradeMessage(data []byte, receivedAt time.Time) (quantti
 		TickRule:     tickRule,
 		IsSequential: hadPrevID && msg.TradeID == prevID+1,
 	}), true, nil
+}
+
+func (c *Coinbase) parseControlMessage(data []byte) (bool, error) {
+	var msg coinbaseControlMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return false, fmt.Errorf("parse coinbase message: %w", err)
+	}
+
+	switch msg.Type {
+	case "error":
+		if msg.Reason != "" {
+			return true, fmt.Errorf("coinbase protocol error: %s (%s)", msg.Message, msg.Reason)
+		}
+		return true, fmt.Errorf("coinbase protocol error: %s", msg.Message)
+	case "subscriptions":
+		if err := c.acceptSubscriptions(msg.Channels); err != nil {
+			return true, err
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (c *Coinbase) acceptSubscriptions(channels []coinbaseSubscriptionChannel) error {
+	expected := make(map[string]struct{}, len(c.Symbols))
+	for _, symbol := range c.Symbols {
+		expected[symbol] = struct{}{}
+	}
+
+	var products []string
+	found := false
+	for _, channel := range channels {
+		if channel.Name == "matches" {
+			products = channel.ProductIDs
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("coinbase subscriptions missing matches channel")
+	}
+
+	actual := make(map[string]struct{}, len(products))
+	for _, product := range products {
+		actual[product] = struct{}{}
+	}
+	for product := range expected {
+		if _, ok := actual[product]; !ok {
+			return fmt.Errorf("coinbase subscriptions missing product %q", product)
+		}
+	}
+	for product := range actual {
+		if _, ok := expected[product]; !ok {
+			return fmt.Errorf("coinbase subscriptions include unexpected product %q", product)
+		}
+	}
+	c.subscribed = true
+	return nil
 }
 
 func parseCoinbaseMatchMessage(data []byte) (coinbaseMatchMessage, bool, error) {
@@ -156,6 +236,7 @@ func parseCoinbaseTradeFields(msg coinbaseMatchMessage) (quanttick.Decimal, quan
 }
 
 func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
+	c.subscribed = false
 	conn, _, err := websocket.Dial(ctx, c.URL, nil)
 	if err != nil {
 		return fmt.Errorf("dial coinbase websocket: %w", err)
@@ -173,9 +254,16 @@ func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) 
 		}
 	}
 
+	readCtx, cancelRead := context.WithTimeout(ctx, websocketSubscriptionTimeout)
+	defer cancelRead()
+	awaitingSubscription := true
+
 	for {
-		messageType, data, err := conn.Read(ctx)
+		messageType, data, err := conn.Read(readCtx)
 		if err != nil {
+			if awaitingSubscription && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("await coinbase subscriptions: %w", err)
+			}
 			if isNormalWebSocketClose(err) {
 				return nil
 			}
@@ -189,6 +277,11 @@ func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) 
 		if err != nil {
 			return err
 		}
+		if awaitingSubscription && c.subscribed {
+			cancelRead()
+			readCtx = ctx
+			awaitingSubscription = false
+		}
 		if !ok {
 			continue
 		}
@@ -199,6 +292,18 @@ func (c *Coinbase) run(ctx context.Context, trades chan<- quanttick.TradeEvent) 
 			return ctx.Err()
 		}
 	}
+}
+
+type coinbaseControlMessage struct {
+	Type     string                        `json:"type"`
+	Message  string                        `json:"message"`
+	Reason   string                        `json:"reason"`
+	Channels []coinbaseSubscriptionChannel `json:"channels"`
+}
+
+type coinbaseSubscriptionChannel struct {
+	Name       string   `json:"name"`
+	ProductIDs []string `json:"product_ids"`
 }
 
 type coinbaseMatchMessage struct {

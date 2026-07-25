@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ type WebSocketDataBufferConfig struct {
 
 type WebSocketDataBuffer struct {
 	mu      sync.Mutex
+	flushMu sync.Mutex
 	buckets map[websocketDataBucketKey]WebSocketDataBucket
 	store   *WebSocketDataStore
 	config  WebSocketDataBufferConfig
@@ -40,6 +42,8 @@ type WebSocketDataBucket struct {
 	RawTrades              []TradeEvent
 	AggregatedTrades       []TradeEvent
 	FilteredTrades         []SignificantTrade
+	rawTradeUIDs           map[string]struct{}
+	aggregatedTradeUIDs    map[string]struct{}
 }
 
 type websocketDataBucketKey struct {
@@ -98,9 +102,21 @@ func (b *WebSocketDataBuffer) addTrade(stream Stream, trade TradeEvent) error {
 	bucket := b.bucket(key)
 	switch stream {
 	case RawTrades:
-		bucket.RawTrades = append(bucket.RawTrades, trade)
+		bucket.RawTrades, bucket.rawTradeUIDs = insertWebSocketDataTrade(
+			bucket.Exchange,
+			stream,
+			bucket.RawTrades,
+			bucket.rawTradeUIDs,
+			trade,
+		)
 	case AggregatedTrades:
-		bucket.AggregatedTrades = append(bucket.AggregatedTrades, trade)
+		bucket.AggregatedTrades, bucket.aggregatedTradeUIDs = insertWebSocketDataTrade(
+			bucket.Exchange,
+			stream,
+			bucket.AggregatedTrades,
+			bucket.aggregatedTradeUIDs,
+			trade,
+		)
 	default:
 		return fmt.Errorf("unsupported websocket data stream: %s", stream)
 	}
@@ -133,23 +149,23 @@ func (b *WebSocketDataBuffer) Flush(ctx context.Context) (int, error) {
 }
 
 func (b *WebSocketDataBuffer) flush(ctx context.Context, include func(websocketDataBucketKey) bool) (int, error) {
-	keys, buckets := b.snapshot(include)
+	// Only one detached batch may be writing at a time. Appends remain available
+	// while the database transaction runs and land in a fresh bucket generation.
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
+	buckets := b.detach(include)
 	if len(buckets) == 0 {
 		return 0, nil
 	}
 	if err := b.store.UpsertBuckets(ctx, buckets); err != nil {
+		b.restore(buckets)
 		return 0, err
-	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, key := range keys {
-		delete(b.buckets, key)
 	}
 	return len(buckets), nil
 }
 
-func (b *WebSocketDataBuffer) snapshot(include func(websocketDataBucketKey) bool) ([]websocketDataBucketKey, []WebSocketDataBucket) {
+func (b *WebSocketDataBuffer) detach(include func(websocketDataBucketKey) bool) []WebSocketDataBucket {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	keys := make([]websocketDataBucketKey, 0, len(b.buckets))
@@ -162,8 +178,39 @@ func (b *WebSocketDataBuffer) snapshot(include func(websocketDataBucketKey) bool
 	buckets := make([]WebSocketDataBucket, 0, len(keys))
 	for _, key := range keys {
 		buckets = append(buckets, b.buckets[key])
+		delete(b.buckets, key)
 	}
-	return keys, buckets
+	return buckets
+}
+
+func (b *WebSocketDataBuffer) restore(buckets []WebSocketDataBucket) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, detached := range buckets {
+		key := newWebSocketDataBucketKey(
+			detached.Exchange,
+			detached.APISymbol,
+			detached.SignificantTradeFilter,
+			detached.Timestamp,
+		)
+		current := b.bucket(key)
+		current.RawTrades = mergeWebSocketDataTrades(
+			detached.Exchange,
+			RawTrades,
+			detached.RawTrades,
+			current.RawTrades,
+		)
+		current.AggregatedTrades = mergeWebSocketDataTrades(
+			detached.Exchange,
+			AggregatedTrades,
+			detached.AggregatedTrades,
+			current.AggregatedTrades,
+		)
+		current.FilteredTrades = nil
+		current.rawTradeUIDs = tradeUIDSet(current.RawTrades)
+		current.aggregatedTradeUIDs = tradeUIDSet(current.AggregatedTrades)
+		b.buckets[key] = current
+	}
 }
 
 func (b *WebSocketDataBuffer) significantTradeFilter(exchange string, symbol string) (int64, error) {
@@ -290,18 +337,25 @@ func mergeExistingWebSocketDataBucket(ctx context.Context, tx *sql.Tx, bucket We
 		return WebSocketDataBucket{}, fmt.Errorf("parse existing aggregated trades: %w", err)
 	}
 
-	bucket.RawTrades = mergeTradesByUID(rawTrades, bucket.RawTrades)
-	bucket.AggregatedTrades = mergeTradesByUID(aggregatedTrades, bucket.AggregatedTrades)
+	bucket.RawTrades = mergeWebSocketDataTrades(bucket.Exchange, RawTrades, rawTrades, bucket.RawTrades)
+	bucket.AggregatedTrades = mergeWebSocketDataTrades(bucket.Exchange, AggregatedTrades, aggregatedTrades, bucket.AggregatedTrades)
 	bucket.FilteredTrades = nil
 	return bucket, nil
 }
 
 func deriveWebSocketDataBucket(bucket WebSocketDataBucket) (WebSocketDataBucket, error) {
+	bucket.RawTrades = canonicalWebSocketDataTrades(bucket.Exchange, RawTrades, bucket.RawTrades)
+	bucket.AggregatedTrades = canonicalWebSocketDataTrades(bucket.Exchange, AggregatedTrades, bucket.AggregatedTrades)
 	if shouldDeriveBitfinexTradesFromRaw(bucket) {
-		bucket.RawTrades = sortBitfinexRawTrades(bucket.APISymbol, bucket.RawTrades)
 		aggregatedTrades, err := aggregateTradeEvents(bucket.RawTrades)
 		if err != nil {
 			return WebSocketDataBucket{}, fmt.Errorf("derive bitfinex aggregated trades for %s %s: %w", bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
+		}
+		bucket.AggregatedTrades = aggregatedTrades
+	} else {
+		aggregatedTrades, err := aggregateTradeEvents(bucket.AggregatedTrades)
+		if err != nil {
+			return WebSocketDataBucket{}, fmt.Errorf("coalesce aggregated trades for %s %s %s: %w", bucket.Exchange, bucket.APISymbol, bucket.Timestamp.Format(time.RFC3339), err)
 		}
 		bucket.AggregatedTrades = aggregatedTrades
 	}
@@ -310,22 +364,6 @@ func deriveWebSocketDataBucket(bucket WebSocketDataBucket) (WebSocketDataBucket,
 
 func shouldDeriveBitfinexTradesFromRaw(bucket WebSocketDataBucket) bool {
 	return bucket.Exchange == "bitfinex" && len(bucket.RawTrades) > 0
-}
-
-// Bitfinex spot REST display order is not fully inferable from the websocket
-// payload or receive order. Use the same deterministic UID order for spot and
-// derivatives so derived websocket buckets are internally consistent, even if
-// spot cannot always match REST display order exactly.
-func sortBitfinexRawTrades(_ string, rawTrades []TradeEvent) []TradeEvent {
-	return sortBitfinexRawTradesByUID(rawTrades)
-}
-
-func sortBitfinexRawTradesByUID(rawTrades []TradeEvent) []TradeEvent {
-	trades := append([]TradeEvent(nil), rawTrades...)
-	sort.SliceStable(trades, func(i, j int) bool {
-		return bitfinexUIDLess(trades[i].UID, trades[j].UID)
-	})
-	return trades
 }
 
 func bitfinexUIDLess(left string, right string) bool {
@@ -464,38 +502,137 @@ func aggregateFilteredTradeSegment(trades []TradeEvent, isMinVolume bool, thresh
 	return filteredTrade, nil
 }
 
-func mergeTradesByUID(existing []TradeEvent, incoming []TradeEvent) []TradeEvent {
-	return mergeByUID(existing, incoming, func(trade TradeEvent) string { return trade.UID })
+func insertWebSocketDataTrade(
+	exchange string,
+	stream Stream,
+	trades []TradeEvent,
+	seen map[string]struct{},
+	trade TradeEvent,
+) ([]TradeEvent, map[string]struct{}) {
+	if seen == nil {
+		seen = tradeUIDSet(trades)
+	}
+	if trade.UID != "" {
+		if _, ok := seen[trade.UID]; ok {
+			if stream != AggregatedTrades {
+				return trades, seen
+			}
+			duplicateIndex := -1
+			for index := range trades {
+				if trades[index].UID == trade.UID {
+					duplicateIndex = index
+					break
+				}
+			}
+			if duplicateIndex < 0 || trade.Ticks <= trades[duplicateIndex].Ticks {
+				return trades, seen
+			}
+			trades[duplicateIndex] = trade
+			sort.SliceStable(trades, func(i, j int) bool {
+				return webSocketDataTradeLess(exchange, stream, trades[i], trades[j])
+			})
+			return trades, seen
+		} else {
+			seen[trade.UID] = struct{}{}
+		}
+	}
+
+	index := sort.Search(len(trades), func(index int) bool {
+		return webSocketDataTradeLess(exchange, stream, trade, trades[index])
+	})
+	trades = append(trades, TradeEvent{})
+	copy(trades[index+1:], trades[index:])
+	trades[index] = trade
+	return trades, seen
 }
 
-func mergeByUID[T any](existing []T, incoming []T, getUID func(T) string) []T {
-	if len(existing) == 0 {
-		return incoming
+func mergeWebSocketDataTrades(exchange string, stream Stream, existing []TradeEvent, incoming []TradeEvent) []TradeEvent {
+	merged := make([]TradeEvent, 0, len(existing)+len(incoming))
+	merged = append(merged, existing...)
+	merged = append(merged, incoming...)
+	return canonicalWebSocketDataTrades(exchange, stream, merged)
+}
+
+func canonicalWebSocketDataTrades(exchange string, stream Stream, trades []TradeEvent) []TradeEvent {
+	if len(trades) == 0 {
+		return nil
 	}
-	if len(incoming) == 0 {
-		return existing
+
+	canonical := make([]TradeEvent, 0, len(trades))
+	seen := make(map[string]int, len(trades))
+	for _, trade := range trades {
+		if trade.UID != "" {
+			if index, ok := seen[trade.UID]; ok {
+				if stream == AggregatedTrades && trade.Ticks > canonical[index].Ticks {
+					canonical[index] = trade
+				}
+				continue
+			}
+			seen[trade.UID] = len(canonical)
+		}
+		canonical = append(canonical, trade)
 	}
-	merged := append([]T(nil), existing...)
-	seen := make(map[string]struct{}, len(existing))
-	for _, item := range existing {
-		uid := getUID(item)
-		if uid != "" {
-			seen[uid] = struct{}{}
+	sort.SliceStable(canonical, func(i, j int) bool {
+		return webSocketDataTradeLess(exchange, stream, canonical[i], canonical[j])
+	})
+	return canonical
+}
+
+func webSocketDataTradeLess(exchange string, stream Stream, left TradeEvent, right TradeEvent) bool {
+	// Bitfinex spot REST display order is not fully inferable from websocket
+	// timestamps, so retain the established deterministic raw UID ordering.
+	if exchange == "bitfinex" && stream == RawTrades {
+		return bitfinexUIDLess(left.UID, right.UID)
+	}
+	if !left.Timestamp.Equal(right.Timestamp) {
+		return left.Timestamp.Before(right.Timestamp)
+	}
+	if left.Nanoseconds != right.Nanoseconds {
+		return left.Nanoseconds < right.Nanoseconds
+	}
+	// BitMEX match IDs and Hyperliquid trade IDs are opaque, not sequences.
+	// For equal exchange timestamps, retain stable feed order rather than inventing one.
+	if exchange == "bitmex" || exchange == "hyperliquid" {
+		return false
+	}
+	return tradeUIDLess(left.UID, right.UID)
+}
+
+func tradeUIDLess(left string, right string) bool {
+	leftID, leftErr := strconv.ParseInt(left, 10, 64)
+	rightID, rightErr := strconv.ParseInt(right, 10, 64)
+	if leftErr == nil && rightErr == nil {
+		return leftID < rightID
+	}
+
+	leftPrefix, leftSuffix, leftOK := splitNumericUIDSuffix(left)
+	rightPrefix, rightSuffix, rightOK := splitNumericUIDSuffix(right)
+	if leftOK && rightOK && leftPrefix == rightPrefix {
+		return leftSuffix < rightSuffix
+	}
+	return left < right
+}
+
+func splitNumericUIDSuffix(uid string) (string, int64, bool) {
+	separator := strings.LastIndexByte(uid, ':')
+	if separator < 0 {
+		return "", 0, false
+	}
+	suffix, err := strconv.ParseInt(uid[separator+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return uid[:separator], suffix, true
+}
+
+func tradeUIDSet(trades []TradeEvent) map[string]struct{} {
+	seen := make(map[string]struct{}, len(trades))
+	for _, trade := range trades {
+		if trade.UID != "" {
+			seen[trade.UID] = struct{}{}
 		}
 	}
-	for _, item := range incoming {
-		uid := getUID(item)
-		if uid == "" {
-			merged = append(merged, item)
-			continue
-		}
-		if _, ok := seen[uid]; ok {
-			continue
-		}
-		seen[uid] = struct{}{}
-		merged = append(merged, item)
-	}
-	return merged
+	return seen
 }
 
 func deleteOldWebSocketData(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {

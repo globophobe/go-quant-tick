@@ -1,10 +1,16 @@
 package exchanges
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
@@ -341,6 +347,178 @@ func assertDecimals(t *testing.T, got []quanttick.Decimal, want []string) {
 		expected := quanttick.MustDecimal(want[i])
 		if !got[i].Equal(expected) {
 			t.Fatalf("decimal[%d] = %s, want %s", i, got[i], expected)
+		}
+	}
+}
+
+func TestBinanceTradesReconnectsAfterSubscriptionErrorAndBuffersUntilAck(t *testing.T) {
+	var connections atomic.Int32
+	preAckTradeSent := make(chan struct{})
+	sendAck := make(chan struct{})
+
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+
+		if connections.Add(1) == 1 {
+			return writeExchangeWebSocketMessage(
+				ctx,
+				conn,
+				`{"code":2,"msg":"Invalid request: bad symbol","id":1}`,
+			)
+		}
+
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			`{"e":"trade","s":"BTCUSDT","t":100,"T":1775606400000,"p":"100","q":"1","m":false}`,
+		); err != nil {
+			return err
+		}
+		close(preAckTradeSent)
+		select {
+		case <-sendAck:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := writeExchangeWebSocketMessage(ctx, conn, `{"result":null,"id":1}`); err != nil {
+			return err
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceURL(url),
+		WithBinanceReconnectDelay(time.Millisecond),
+		WithBinanceSubscriptionTimeout(time.Second),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades, errs := exchange.Trades(ctx)
+
+	select {
+	case err := <-errs:
+		if err == nil || !strings.Contains(err.Error(), "binance websocket error 2") {
+			t.Fatalf("subscription error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for subscription error")
+	}
+
+	select {
+	case <-preAckTradeSent:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for pre-ack trade")
+	}
+	select {
+	case trade := <-trades:
+		t.Fatalf("trade emitted before subscription acknowledgement: %#v", trade)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(sendAck)
+
+	select {
+	case trade := <-trades:
+		if trade.UID != "100" {
+			t.Fatalf("trade uid = %s, want 100", trade.UID)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for buffered trade")
+	}
+
+	cancel()
+	select {
+	case _, ok := <-trades:
+		if ok {
+			t.Fatal("unexpected trade after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("trade stream did not stop after cancellation")
+	}
+	if got := connections.Load(); got < 2 {
+		t.Fatalf("connections = %d, want at least 2", got)
+	}
+}
+
+func TestBinanceServerShutdownReconnectsImmediately(t *testing.T) {
+	var connections atomic.Int32
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		connection := connections.Add(1)
+		if err := writeExchangeWebSocketMessage(ctx, conn, `{"result":null,"id":1}`); err != nil {
+			return err
+		}
+		if connection == 1 {
+			if err := writeExchangeWebSocketMessage(ctx, conn, `{"e":"serverShutdown","E":1775606400000}`); err != nil {
+				return err
+			}
+			_, _ = readExchangeWebSocketMessage(ctx, conn)
+			return nil
+		}
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			`{"e":"trade","s":"BTCUSDT","t":200,"T":1775606401000,"p":"101","q":"1","m":false}`,
+		); err != nil {
+			return err
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceURL(url),
+		WithBinanceReconnectDelay(5*time.Second),
+		WithBinanceSubscriptionTimeout(time.Second),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades, errs := exchange.Trades(ctx)
+
+	select {
+	case err := <-errs:
+		if !errors.Is(err, errBinanceServerShutdown) {
+			t.Fatalf("server shutdown error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for server shutdown error")
+	}
+	select {
+	case trade := <-trades:
+		if trade.UID != "200" {
+			t.Fatalf("trade uid = %s, want 200", trade.UID)
+		}
+	case <-ctx.Done():
+		t.Fatal("server shutdown did not trigger an immediate replacement connection")
+	}
+	cancel()
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
+}
+
+func TestParseBinanceSubscriptionResponseDetectsServerShutdown(t *testing.T) {
+	_, err := parseBinanceSubscriptionResponse([]byte(`{"e":"serverShutdown","E":1775606400000}`))
+	if !errors.Is(err, errBinanceServerShutdown) {
+		t.Fatalf("server shutdown error = %v", err)
+	}
+}
+
+func TestParseBinanceSubscriptionResponseRejectsProtocolFailures(t *testing.T) {
+	tests := []string{
+		`{"code":2,"msg":"Invalid request","id":1}`,
+		`{"result":null,"id":2}`,
+		`{"result":[],"id":1}`,
+	}
+	for _, message := range tests {
+		if _, err := parseBinanceSubscriptionResponse([]byte(message)); err == nil {
+			t.Fatalf("expected subscription failure for %s", message)
 		}
 	}
 }

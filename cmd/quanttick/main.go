@@ -62,9 +62,12 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		return err
 	}
 	handler := pipeline.Handle
-	if eventFlusher, ok := bucketFlusher.(interface {
-		FlushBefore(context.Context, string, string, time.Time) (int, error)
-	}); ok {
+	var flushWorker *bucketFlushWorker
+	if eventFlusher, ok := bucketFlusher.(bucketFlushBeforeer); ok {
+		flushWorker = newBucketFlushWorker(ctx, eventFlusher, flushTimeout(), func(err error) {
+			log.Printf("bucket flush error: %v", err)
+			reporter.Capture(err)
+		})
 		flushWatermarks := make(map[string]time.Time)
 		handler = func(ctx context.Context, trade quanttick.TradeEvent) error {
 			if err := pipeline.Handle(ctx, trade); err != nil {
@@ -74,8 +77,8 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			if err := pipeline.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp); err != nil {
 				return err
 			}
-			_, err := eventFlusher.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp)
-			return err
+			flushWorker.Request(trade.Exchange, trade.Symbol, flushTimestamp)
+			return nil
 		}
 	}
 
@@ -94,6 +97,11 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		if !errors.Is(ctx.Err(), context.Canceled) {
 			runErr = ctx.Err()
 		}
+	}
+	if flushWorker != nil {
+		// The complete buffer flush below supersedes any coalesced FlushBefore
+		// requests that have not completed yet.
+		flushWorker.Close()
 	}
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
@@ -363,7 +371,9 @@ func configureDatabasePublishers(
 	if streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades] {
 		config.AggregatedPublisher = buffer.AggregatedPublisher()
 	}
-	if err := db.PingContext(ctx); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, flushTimeout())
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
 		return fail(fmt.Errorf("ping database: %w", err))
 	}
 	return buffer, cleanup, nil
@@ -542,4 +552,8 @@ func durationEnv(name string, defaultValue time.Duration) (time.Duration, error)
 		return 0, fmt.Errorf("parse %s: %s", name, value)
 	}
 	return duration, nil
+}
+
+func flushTimeout() time.Duration {
+	return durationEnvDefault("FLUSH_TIMEOUT", 5*time.Second)
 }

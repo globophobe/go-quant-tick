@@ -243,18 +243,25 @@ func ValidateStreams(streams []Stream) error {
 }
 
 func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler, errorHandler ErrorHandler) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	adapterCtx, cancelAdapters := context.WithCancel(ctx)
+	defer cancelAdapters()
+
+	// Once a trade has entered the fan-in, finish handling it even if the
+	// caller cancels. The adapter context still cancels immediately so no new
+	// network work is admitted while the already-queued output drains.
+	handlerCtx := context.WithoutCancel(ctx)
+	forwardCtx, cancelForwarding := context.WithCancel(context.Background())
+	defer cancelForwarding()
 
 	trades := make(chan TradeEvent, len(clients))
 	errs := make(chan error, len(clients))
 
 	var wg sync.WaitGroup
 	for _, client := range clients {
-		tradeC, errC := client.Trades(ctx)
+		tradeC, errC := client.Trades(adapterCtx)
 		wg.Add(2)
-		go forwardTrades(ctx, &wg, tradeC, trades)
-		go forwardErrors(ctx, &wg, errC, errs)
+		go forwardTrades(forwardCtx, &wg, tradeC, trades)
+		go forwardErrors(forwardCtx, &wg, errC, errs)
 	}
 
 	go func() {
@@ -263,6 +270,8 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 		close(errs)
 	}()
 
+	ctxDone := ctx.Done()
+	var shutdownErr error
 	for trades != nil || errs != nil {
 		select {
 		case trade, ok := <-trades:
@@ -270,7 +279,7 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 				trades = nil
 				continue
 			}
-			if err := handler(ctx, trade); err != nil {
+			if err := handler(handlerCtx, trade); err != nil {
 				return err
 			}
 		case err, ok := <-errs:
@@ -281,15 +290,20 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 			if err != nil && errorHandler != nil {
 				errorHandler(err)
 			}
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil
-			}
-			return ctx.Err()
+		case <-ctxDone:
+			shutdownErr = ctx.Err()
+			cancelAdapters()
+			ctxDone = nil
 		}
 	}
 
-	return nil
+	if shutdownErr == nil {
+		shutdownErr = ctx.Err()
+	}
+	if errors.Is(shutdownErr, context.Canceled) {
+		return nil
+	}
+	return shutdownErr
 }
 
 func forwardTrades(ctx context.Context, wg *sync.WaitGroup, input <-chan TradeEvent, output chan<- TradeEvent) {

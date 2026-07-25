@@ -1,9 +1,14 @@
 package exchanges
 
 import (
+	"context"
+	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
@@ -42,7 +47,7 @@ func TestBitfinexParseTradeMessages(t *testing.T) {
 	exchange := NewBitfinex([]string{"tBTCUSD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 	messages := []string{
-		`{"event":"subscribed","chanId":1,"symbol":"tBTCUSD"}`,
+		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
 		`[1,"hb"]`,
 		`[1,"te",[100,1775557139000,1,99]]`,
 		`[1,"te",[102,1775557140000,1,100]]`,
@@ -82,7 +87,7 @@ func TestBitfinexParseIgnoresExecuteAndPublishesUpdate(t *testing.T) {
 	exchange := NewBitfinex([]string{"tBTCUSD"})
 	receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 	messages := []string{
-		`{"event":"subscribed","chanId":1,"symbol":"tBTCUSD"}`,
+		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
 		`[1,"te",[100,1775557140000,1,100]]`,
 		`[1,"tu",[100,1775557140001,2,101]]`,
 	}
@@ -108,7 +113,7 @@ func TestBitfinexQueuesUpdatesUntilExecuteOrderIsConfirmed(t *testing.T) {
 			receivedAt := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 
 			messages := []string{
-				`{"event":"subscribed","chanId":1,"symbol":"` + symbol + `"}`,
+				`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"` + symbol + `"}`,
 				`[1,"te",[100,1775557140000,1,100]]`,
 				`[1,"te",[101,1775557140001,1,101]]`,
 				`[1,"tu",[101,1775557141001,1,101]]`,
@@ -146,9 +151,8 @@ func TestBitfinexParseIgnoresUnknownChannelAndSnapshots(t *testing.T) {
 
 	messages := []string{
 		`[1,"tu",[100,1775557140000,1,100]]`,
-		`{"event":"subscribed","chanId":1,"symbol":"tBTCUSD"}`,
+		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
 		`[1,[[100,1775557140000,1,100]]]`,
-		`{"event":"error","msg":"bad symbol"}`,
 	}
 
 	trades := parseBitfinexFixture(t, exchange, messages, time.Now().UTC())
@@ -161,7 +165,7 @@ func TestBitfinexParsesStringNumericFields(t *testing.T) {
 	exchange := NewBitfinex([]string{"BTCUSD"})
 	receivedAt := time.Now().UTC()
 	messages := []string{
-		`{"event":"subscribed","chanId":"1","symbol":"tBTCUSD"}`,
+		`{"event":"subscribed","channel":"trades","chanId":"1","symbol":"tBTCUSD"}`,
 		`["1","te",["100","1775557140000","-1.5","100.5"]]`,
 		`["1","tu",["100","1775557140000","-1.5","100.5"]]`,
 	}
@@ -172,6 +176,153 @@ func TestBitfinexParsesStringNumericFields(t *testing.T) {
 	assertDecimals(t, tradePrices(trades), []string{"100.5"})
 	assertDecimals(t, tradeNotionals(trades), []string{"1.5"})
 	assertDecimals(t, tradeVolumes(trades), []string{"150.75"})
+}
+
+func TestBitfinexResetSessionDropsIncompletePairingState(t *testing.T) {
+	exchange := NewBitfinex([]string{"tBTCUSD"})
+	receivedAt := time.Now().UTC()
+
+	trades := parseBitfinexFixture(t, exchange, []string{
+		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
+		`[1,"te",[100,1775557140000,1,100]]`,
+	}, receivedAt)
+	if len(trades) != 0 {
+		t.Fatalf("incomplete trade unexpectedly emitted: %#v", trades)
+	}
+
+	exchange.resetSessionState()
+	trades = parseBitfinexFixture(t, exchange, []string{
+		`[1,"tu",[100,1775557141000,1,100]]`,
+		`{"event":"subscribed","channel":"trades","chanId":2,"symbol":"tBTCUSD"}`,
+		`[2,"te",[101,1775557142000,1,101]]`,
+		`[2,"tu",[101,1775557142001,1,101]]`,
+	}, receivedAt)
+	assertStrings(t, tradeUIDs(trades), []string{"101"})
+}
+
+func TestBitfinexSubscriptionCompleteness(t *testing.T) {
+	exchange := NewBitfinex([]string{"BTCUSD", "ETHUSD"})
+	if exchange.subscriptionsReady() {
+		t.Fatal("subscriptions should not be ready before acknowledgements")
+	}
+
+	if _, err := exchange.ParseTradeMessage(
+		[]byte(`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`),
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if exchange.subscriptionsReady() {
+		t.Fatal("subscriptions should wait for every requested symbol")
+	}
+
+	if _, err := exchange.ParseTradeMessage(
+		[]byte(`{"event":"subscribed","channel":"trades","chanId":2,"symbol":"tETHUSD"}`),
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !exchange.subscriptionsReady() {
+		t.Fatal("subscriptions should be ready after every acknowledgement")
+	}
+}
+
+func TestBitfinexProtocolFailuresSurface(t *testing.T) {
+	exchange := NewBitfinex([]string{"BTCUSD"})
+	messages := []string{
+		`{"event":"error","code":10001,"msg":"unknown pair"}`,
+		`{"event":"info","code":20051,"msg":"reconnect"}`,
+		`{"event":"info","platform":{"status":0}}`,
+		`{"event":"subscribed","channel":"book","chanId":1,"symbol":"tBTCUSD"}`,
+		`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tETHUSD"}`,
+	}
+	for _, message := range messages {
+		if _, err := exchange.ParseTradeMessage([]byte(message), time.Now().UTC()); err == nil {
+			t.Fatalf("expected protocol failure for %s", message)
+		}
+	}
+
+	if _, err := exchange.ParseTradeMessage(
+		[]byte(`{"event":"info","version":2,"platform":{"status":1}}`),
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("operative info message should be accepted: %v", err)
+	}
+}
+
+func TestBitfinexTradesReconnectDropsIncompletePairingState(t *testing.T) {
+	var connections atomic.Int32
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		connection := connections.Add(1)
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return fmt.Errorf("read subscription on connection %d: %w", connection, err)
+		}
+
+		switch connection {
+		case 1:
+			for _, message := range []string{
+				`{"event":"subscribed","channel":"trades","chanId":1,"symbol":"tBTCUSD"}`,
+				`[1,"te",[100,1775557140000,1,100]]`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			return conn.Close(websocket.StatusGoingAway, "test reconnect")
+		case 2:
+			for _, message := range []string{
+				`{"event":"subscribed","channel":"trades","chanId":2,"symbol":"tBTCUSD"}`,
+				`[2,"te",[101,1775557141000,1,101]]`,
+				`[2,"tu",[101,1775557141001,1,101]]`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			_, _ = readExchangeWebSocketMessage(ctx, conn)
+			return nil
+		default:
+			return fmt.Errorf("unexpected connection %d", connection)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	exchange := NewBitfinex(
+		[]string{"BTCUSD"},
+		WithBitfinexURL(url),
+		WithBitfinexReconnectDelay(0),
+	)
+	trades, errs := exchange.Trades(ctx)
+
+	var uids []string
+	for len(uids) < 1 {
+		select {
+		case trade, ok := <-trades:
+			if !ok {
+				t.Fatal("trade channel closed before the reconnected trade arrived")
+			}
+			uids = append(uids, trade.UID)
+		case err, ok := <-errs:
+			if !ok {
+				t.Fatal("error channel closed before the reconnected trade arrived")
+			}
+			if err == nil {
+				t.Fatal("received nil collector error")
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for reconnected trade: %v", ctx.Err())
+		}
+	}
+	cancel()
+	for trade := range trades {
+		uids = append(uids, trade.UID)
+	}
+
+	assertStrings(t, uids, []string{"101"})
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
 }
 
 func parseBitfinexFixture(t *testing.T, exchange *Bitfinex, messages []string, receivedAt time.Time) []quanttick.TradeEvent {

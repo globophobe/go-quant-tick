@@ -124,6 +124,178 @@ func TestWebSocketDataBufferKeepsCurrentEventMinuteInMemory(t *testing.T) {
 	}
 }
 
+func TestWebSocketDataBufferOrdersAndDeduplicatesTradesInMemory(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	buffer := NewWebSocketDataBuffer(
+		NewWebSocketDataStore(db),
+		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
+	)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	trades := []TradeEvent{
+		testTrade("20", timestamp.Add(20*time.Second), withExchange("coinbase"), withSymbol("BTC-USD")),
+		testTrade("10", timestamp.Add(10*time.Second), withExchange("coinbase"), withSymbol("BTC-USD")),
+		testTrade("15", timestamp.Add(15*time.Second), withExchange("coinbase"), withSymbol("BTC-USD")),
+		testTrade("15", timestamp.Add(16*time.Second), withExchange("coinbase"), withSymbol("BTC-USD")),
+	}
+	trades[3].Ticks = 3
+	for _, trade := range trades {
+		if err := buffer.RawPublisher().Publish(context.Background(), trade); err != nil {
+			t.Fatal(err)
+		}
+		if err := buffer.AggregatedPublisher().Publish(context.Background(), trade); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	key := newWebSocketDataBucketKey("coinbase", "BTC-USD", 1000, timestamp)
+	buffer.mu.Lock()
+	bucket := buffer.buckets[key]
+	buffer.mu.Unlock()
+	assertTradeUIDs(t, bucket.RawTrades, []string{"10", "15", "20"})
+	assertTradeUIDs(t, bucket.AggregatedTrades, []string{"10", "15", "20"})
+	if !bucket.RawTrades[1].Timestamp.Equal(timestamp.Add(15 * time.Second)) {
+		t.Fatalf("raw duplicate UID should preserve first trade, got timestamp %s", bucket.RawTrades[1].Timestamp)
+	}
+	if !bucket.AggregatedTrades[1].Timestamp.Equal(timestamp.Add(16*time.Second)) || bucket.AggregatedTrades[1].Ticks != 3 {
+		t.Fatalf("aggregated duplicate UID should preserve the greater-ticks variant: %#v", bucket.AggregatedTrades[1])
+	}
+}
+
+func TestWebSocketDataTradesPreserveBitmexFeedOrderForEqualTimestamps(t *testing.T) {
+	timestamp := time.Now().UTC().Truncate(time.Microsecond)
+	incoming := []TradeEvent{
+		testTrade("z-opaque", timestamp, withExchange("bitmex"), withSymbol("XBTUSD")),
+		testTrade("a-opaque", timestamp, withExchange("bitmex"), withSymbol("XBTUSD")),
+	}
+	var trades []TradeEvent
+	var seen map[string]struct{}
+	for _, trade := range incoming {
+		trades, seen = insertWebSocketDataTrade("bitmex", RawTrades, trades, seen, trade)
+	}
+	assertTradeUIDs(t, trades, []string{"z-opaque", "a-opaque"})
+	canonical := canonicalWebSocketDataTrades("bitmex", RawTrades, incoming)
+	assertTradeUIDs(t, canonical, []string{"z-opaque", "a-opaque"})
+}
+
+func TestWebSocketDataTradesPreserveHyperliquidFeedOrderForEqualTimestamps(t *testing.T) {
+	timestamp := time.Now().UTC().Truncate(time.Millisecond)
+	incoming := []TradeEvent{
+		testTrade(
+			"1775606400000:BTC:20",
+			timestamp,
+			withExchange("hyperliquid"),
+			withSymbol("BTC"),
+		),
+		testTrade(
+			"1775606400000:BTC:10",
+			timestamp,
+			withExchange("hyperliquid"),
+			withSymbol("BTC"),
+		),
+	}
+	canonical := canonicalWebSocketDataTrades("hyperliquid", RawTrades, incoming)
+	assertTradeUIDs(t, canonical, []string{"1775606400000:BTC:20", "1775606400000:BTC:10"})
+}
+
+func TestWebSocketDataBufferPreservesTradePublishedDuringFlush(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	db.SetMaxOpenConns(1)
+	buffer := NewWebSocketDataBuffer(
+		NewWebSocketDataStore(db),
+		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
+	)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	first := testTrade("10", timestamp.Add(10*time.Second), withExchange("coinbase"), withSymbol("BTC-USD"))
+	late := testTrade("15", timestamp.Add(15*time.Second), withExchange("coinbase"), withSymbol("BTC-USD"))
+	if err := buffer.RawPublisher().Publish(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+
+	heldConnection, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			_ = heldConnection.Close()
+		}
+	}()
+
+	type flushResult struct {
+		count int
+		err   error
+	}
+	flushContext, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFlush()
+	result := make(chan flushResult, 1)
+	initialWaitCount := db.Stats().WaitCount
+	go func() {
+		count, err := buffer.Flush(flushContext)
+		result <- flushResult{count: count, err: err}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for db.Stats().WaitCount == initialWaitCount {
+		if time.Now().After(deadline) {
+			t.Fatal("flush did not reach the blocked database write")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := buffer.RawPublisher().Publish(context.Background(), late); err != nil {
+		t.Fatal(err)
+	}
+	if err := heldConnection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	released = true
+
+	flush := <-result
+	if flush.err != nil {
+		t.Fatal(flush.err)
+	}
+	if flush.count != 1 {
+		t.Fatalf("flushed buckets = %d, want 1", flush.count)
+	}
+	if count, err := buffer.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if count != 1 {
+		t.Fatalf("second flush buckets = %d, want 1", count)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	assertTradeUIDs(t, row.rawTrades, []string{"10", "15"})
+}
+
+func TestWebSocketDataBufferRestoresBucketAfterFlushFailure(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	buffer := NewWebSocketDataBuffer(
+		NewWebSocketDataStore(db),
+		WebSocketDataBufferConfig{DefaultSignificantTradeFilter: MustDecimal("1000")},
+	)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	trade := testTrade("10", timestamp.Add(10*time.Second), withExchange("coinbase"), withSymbol("BTC-USD"))
+	if err := buffer.RawPublisher().Publish(context.Background(), trade); err != nil {
+		t.Fatal(err)
+	}
+
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if count, err := buffer.Flush(canceledContext); err == nil {
+		t.Fatal("expected canceled flush to fail")
+	} else if count != 0 {
+		t.Fatalf("flushed buckets = %d, want 0", count)
+	}
+	if count, err := buffer.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if count != 1 {
+		t.Fatalf("retry flushed buckets = %d, want 1", count)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	assertTradeUIDs(t, row.rawTrades, []string{"10"})
+}
+
 func TestWebSocketDataBufferUsesSymbolThreshold(t *testing.T) {
 	db := newWebSocketDataTestDB(t)
 	buffer := NewWebSocketDataBuffer(
@@ -211,6 +383,158 @@ func TestWebSocketDataStoreMergesExistingBucketOnConflict(t *testing.T) {
 	if len(row.filteredTrades) != 0 {
 		t.Fatalf("filtered trades = %#v", row.filteredTrades)
 	}
+}
+
+func TestWebSocketDataStoreChronologicallyMergesLateTradesAndDeduplicatesUIDs(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	trade := func(uid string, offset time.Duration, price string) TradeEvent {
+		return testTrade(
+			uid,
+			timestamp.Add(offset),
+			withExchange("coinbase"),
+			withSymbol("BTC-USD"),
+			withPrice(price),
+			withNotional("12"),
+		)
+	}
+	first := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades:              []TradeEvent{trade("10", 10*time.Second, "100"), trade("20", 20*time.Second, "102")},
+		AggregatedTrades:       []TradeEvent{trade("10", 10*time.Second, "100"), trade("20", 20*time.Second, "102")},
+	}
+	late := WebSocketDataBucket{
+		Exchange:               "coinbase",
+		APISymbol:              "BTC-USD",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		RawTrades: []TradeEvent{
+			trade("20", 5*time.Second, "999"),
+			trade("15", 15*time.Second, "101"),
+			trade("15", 16*time.Second, "998"),
+		},
+		AggregatedTrades: []TradeEvent{
+			trade("20", 5*time.Second, "999"),
+			trade("15", 15*time.Second, "101"),
+			trade("15", 16*time.Second, "998"),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{late}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{late}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	assertTradeUIDs(t, row.rawTrades, []string{"10", "15", "20"})
+	assertTradeUIDs(t, row.aggregatedTrades, []string{"10", "15", "20"})
+	assertSignificantTradeUIDs(t, row.filteredTrades, []string{"10", "15", "20"})
+	assertDecimal(t, row.rawTrades[1].Price, "101")
+	assertDecimal(t, row.rawTrades[2].Price, "102")
+}
+
+func TestWebSocketDataStoreCoalescesLateSameSampleAggregatesAfterSorting(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	bucket := WebSocketDataBucket{
+		Exchange:               "hyperliquid",
+		APISymbol:              "BTC",
+		SignificantTradeFilter: 1000,
+		Timestamp:              timestamp,
+		AggregatedTrades: []TradeEvent{
+			testTrade(
+				"10",
+				timestamp.Add(10*time.Second),
+				withExchange("hyperliquid"),
+				withSymbol("BTC"),
+				withNotional("6"),
+			),
+			testTrade(
+				"20",
+				timestamp.Add(20*time.Second),
+				withExchange("hyperliquid"),
+				withSymbol("BTC"),
+				withNotional("1"),
+			),
+			testTrade(
+				"11",
+				timestamp.Add(10*time.Second),
+				withExchange("hyperliquid"),
+				withSymbol("BTC"),
+				withNotional("6"),
+			),
+		},
+	}
+
+	if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{bucket}); err != nil {
+		t.Fatal(err)
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	assertTradeUIDs(t, row.aggregatedTrades, []string{"10", "20"})
+	if row.aggregatedTrades[0].Ticks != 2 {
+		t.Fatalf("coalesced ticks = %d, want 2", row.aggregatedTrades[0].Ticks)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Volume, "1200")
+	if len(row.filteredTrades) != 2 || row.filteredTrades[0].UID != "10" {
+		t.Fatalf("filtered trades = %#v", row.filteredTrades)
+	}
+	if row.filteredTrades[0].Volume == nil {
+		t.Fatal("coalesced significant trade should retain per-trade volume")
+	}
+	assertDecimal(t, *row.filteredTrades[0].Volume, "1200")
+}
+
+func TestWebSocketDataStorePrefersGreaterTicksForDuplicateAggregateUID(t *testing.T) {
+	db := newWebSocketDataTestDB(t)
+	store := NewWebSocketDataStore(db)
+	timestamp := time.Now().UTC().Truncate(time.Minute)
+	partial := testTrade(
+		"10",
+		timestamp.Add(10*time.Second),
+		withExchange("coinbase"),
+		withSymbol("BTC-USD"),
+		withNotional("1"),
+	)
+	complete := testTrade(
+		"10",
+		timestamp.Add(10*time.Second),
+		withExchange("coinbase"),
+		withSymbol("BTC-USD"),
+		withNotional("3"),
+	)
+	complete.Ticks = 3
+
+	for _, trade := range []TradeEvent{partial, complete} {
+		if err := store.UpsertBuckets(context.Background(), []WebSocketDataBucket{{
+			Exchange:               "coinbase",
+			APISymbol:              "BTC-USD",
+			SignificantTradeFilter: 1000,
+			Timestamp:              timestamp,
+			AggregatedTrades:       []TradeEvent{trade},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	row := getWebSocketDataTestRow(t, db)
+	if len(row.aggregatedTrades) != 1 {
+		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
+	}
+	if row.aggregatedTrades[0].Ticks != 3 {
+		t.Fatalf("aggregate ticks = %d, want 3", row.aggregatedTrades[0].Ticks)
+	}
+	assertDecimal(t, row.aggregatedTrades[0].Volume, "300")
 }
 
 func TestWebSocketDataStoreDerivesFilteredTradesFromAggregatedBucket(t *testing.T) {
@@ -582,6 +906,14 @@ func TestWebSocketDataStorePreservesBitfinexSpotUIDOrderAcrossMerge(t *testing.T
 		Timestamp:              timestamp,
 		RawTrades: []TradeEvent{
 			testTrade(
+				"1919360087",
+				timestamp.Add(time.Second),
+				withExchange("bitfinex"),
+				withSymbol("tBTCUSD"),
+				withPrice("1"),
+				withNotional("1"),
+			),
+			testTrade(
 				"1919360090",
 				timestamp.Add(2*time.Second+757*time.Millisecond),
 				withExchange("bitfinex"),
@@ -599,6 +931,7 @@ func TestWebSocketDataStorePreservesBitfinexSpotUIDOrderAcrossMerge(t *testing.T
 	if len(row.rawTrades) != 3 || row.rawTrades[0].UID != "1919360086" || row.rawTrades[1].UID != "1919360087" {
 		t.Fatalf("spot UID order should survive bucket merge: %#v", row.rawTrades)
 	}
+	assertDecimal(t, row.rawTrades[1].Price, "78078")
 	if len(row.aggregatedTrades) != 2 {
 		t.Fatalf("aggregated trades = %#v", row.aggregatedTrades)
 	}
@@ -727,6 +1060,30 @@ func unmarshalWebSocketDataTestPayload(t *testing.T, payload string, dst any) {
 	t.Helper()
 	if err := json.Unmarshal([]byte(payload), dst); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertTradeUIDs(t *testing.T, trades []TradeEvent, want []string) {
+	t.Helper()
+	if len(trades) != len(want) {
+		t.Fatalf("trade count = %d, want %d: %#v", len(trades), len(want), trades)
+	}
+	for index, uid := range want {
+		if trades[index].UID != uid {
+			t.Fatalf("trade UIDs[%d] = %s, want %s: %#v", index, trades[index].UID, uid, trades)
+		}
+	}
+}
+
+func assertSignificantTradeUIDs(t *testing.T, trades []SignificantTrade, want []string) {
+	t.Helper()
+	if len(trades) != len(want) {
+		t.Fatalf("significant trade count = %d, want %d: %#v", len(trades), len(want), trades)
+	}
+	for index, uid := range want {
+		if trades[index].UID != uid {
+			t.Fatalf("significant trade UIDs[%d] = %s, want %s: %#v", index, trades[index].UID, uid, trades)
+		}
 	}
 }
 

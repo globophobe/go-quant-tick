@@ -328,3 +328,19 @@ func testCommandTrade(uid string, exchange string, symbol string, timestamp time
 		IsSequential: true,
 	})
 }
+
+func TestFlushTimeoutReadsDuration(t *testing.T) {
+	t.Setenv("FLUSH_TIMEOUT", "3s")
+
+	if got := flushTimeout(); got != 3*time.Second {
+		t.Fatalf("timeout = %s, want 3s", got)
+	}
+}
+
+func TestFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
+	t.Setenv("FLUSH_TIMEOUT", "bad")
+
+	if got := flushTimeout(); got != 5*time.Second {
+		t.Fatalf("timeout = %s, want 5s", got)
+	}
+}
