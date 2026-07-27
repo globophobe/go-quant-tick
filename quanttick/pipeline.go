@@ -26,12 +26,13 @@ var validStreams = map[Stream]struct{}{
 type TradeHandler func(context.Context, TradeEvent) error
 type ErrorHandler func(error)
 
+// TradePipeline derives and publishes trade streams. Calls must be serialized,
+// and publishers must not call back into the pipeline.
 type TradePipeline struct {
 	RawPublisher         Publisher[TradeEvent]
 	AggregatedPublisher  Publisher[TradeEvent]
 	SignificantPublisher Publisher[SignificantTrade]
 
-	mu                    sync.Mutex
 	tradeAggregator       *TradeAggregator
 	significantAggregator *SignificantTradeAggregator
 }
@@ -67,9 +68,6 @@ func NewTradePipeline(config TradePipelineConfig) *TradePipeline {
 }
 
 func (p *TradePipeline) Handle(ctx context.Context, trade TradeEvent) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.RawPublisher != nil {
 		if err := p.RawPublisher.Publish(ctx, trade); err != nil {
 			return fmt.Errorf("publish raw trade: %w", err)
@@ -108,9 +106,6 @@ func (p *TradePipeline) Handle(ctx context.Context, trade TradeEvent) error {
 }
 
 func (p *TradePipeline) Flush(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if err := p.flushAggregatedTrades(ctx); err != nil {
 		return err
 	}
@@ -118,9 +113,6 @@ func (p *TradePipeline) Flush(ctx context.Context) error {
 }
 
 func (p *TradePipeline) FlushBefore(ctx context.Context, exchange string, symbol string, timestamp time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	boundary := timestamp.UTC().Truncate(time.Minute)
 	key := ExchangeSymbolKey(exchange, symbol)
 	if err := p.flushAggregatedTradeKeyBefore(ctx, key, boundary); err != nil {

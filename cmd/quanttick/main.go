@@ -11,8 +11,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -149,34 +147,19 @@ func hasTradeStreams(streams map[quanttick.Stream]bool) bool {
 	return streams[quanttick.RawTrades] || streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades]
 }
 
-var websocketHandshakeStatusPattern = regexp.MustCompile(`expected handshake response status code 101 but got ([0-9]+)`)
+type transientErrorClassifier interface {
+	ClassifyTransient() (bool, bool)
+}
 
 func isTransientExchangeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isTransientWebSocketReadError(err) {
-		return true
-	}
-	text := err.Error()
-	if !strings.Contains(text, "failed to WebSocket dial") {
-		return false
-	}
-	match := websocketHandshakeStatusPattern.FindStringSubmatch(text)
-	if len(match) != 2 {
-		return false
-	}
-	status, parseErr := strconv.Atoi(match[1])
-	if parseErr != nil {
-		return false
-	}
-	return status == 429 || status >= 500
-}
-
-func isTransientWebSocketReadError(err error) bool {
-	text := err.Error()
-	if !strings.Contains(text, "read ") || !strings.Contains(text, " websocket") {
-		return false
+	var classifier transientErrorClassifier
+	if errors.As(err, &classifier) {
+		if transient, known := classifier.ClassifyTransient(); known {
+			return transient
+		}
 	}
 	if errors.Is(err, syscall.ETIMEDOUT) {
 		return true

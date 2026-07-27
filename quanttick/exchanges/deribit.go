@@ -139,11 +139,10 @@ func (d *Deribit) run(
 	trades chan<- quanttick.TradeEvent,
 	errs chan<- error,
 ) error {
-	conn, _, err := websocket.Dial(ctx, d.URL, nil)
+	conn, err := dialWebSocket(ctx, DeribitName, d.URL)
 	if err != nil {
-		return fmt.Errorf("dial deribit websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range d.SubscriptionMessages() {

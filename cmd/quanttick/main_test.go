@@ -17,6 +17,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type testTransientExchangeError struct {
+	message   string
+	transient bool
+	known     bool
+	err       error
+}
+
+func (e testTransientExchangeError) Error() string {
+	return e.message
+}
+
+func (e testTransientExchangeError) Unwrap() error {
+	return e.err
+}
+
+func (e testTransientExchangeError) ClassifyTransient() (bool, bool) {
+	return e.transient, e.known
+}
+
 func TestWebSocketDataStreamsDefaultsToSignificantTrades(t *testing.T) {
 	t.Setenv("WEBSOCKET_DATA_STREAMS", "")
 
@@ -49,25 +68,40 @@ func TestPublisherModeNormalizesValue(t *testing.T) {
 	}
 }
 
-func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t *testing.T) {
+func TestIsTransientExchangeErrorUsesTypedAndNetworkErrors(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
 		{
-			name: "cloudflare 520",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 520"),
+			name: "typed transient error",
+			err: testTransientExchangeError{
+				message:   "temporary dial error",
+				transient: true,
+				known:     true,
+			},
 			want: true,
 		},
 		{
-			name: "server 503",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 503"),
+			name: "wrapped typed transient error",
+			err: fmt.Errorf("wrapped: %w", testTransientExchangeError{
+				message:   "temporary dial error",
+				transient: true,
+				known:     true,
+			}),
 			want: true,
 		},
 		{
-			name: "rate limited",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 429"),
+			name: "unclassified dial timeout",
+			err: testTransientExchangeError{
+				message: "dial failed",
+				err: &net.OpError{
+					Op:  "dial",
+					Net: "tcp",
+					Err: syscall.ETIMEDOUT,
+				},
+			},
 			want: true,
 		},
 		{
@@ -83,8 +117,12 @@ func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t
 			want: true,
 		},
 		{
-			name: "forbidden is not transient",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 403"),
+			name: "typed permanent error",
+			err: testTransientExchangeError{
+				message:   "forbidden",
+				transient: false,
+				known:     true,
+			},
 			want: false,
 		},
 		{

@@ -1,9 +1,12 @@
 package exchanges
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
 	"syscall"
 	"time"
 
@@ -11,6 +14,48 @@ import (
 )
 
 const maxWebSocketMessageBytes int64 = 16 << 20
+
+type websocketDialError struct {
+	exchange   string
+	statusCode int
+	err        error
+}
+
+func (e *websocketDialError) Error() string {
+	return fmt.Sprintf("dial %s websocket: %v", e.exchange, e.err)
+}
+
+func (e *websocketDialError) Unwrap() error {
+	return e.err
+}
+
+func (e *websocketDialError) ClassifyTransient() (bool, bool) {
+	if e.statusCode == 0 {
+		return false, false
+	}
+	return e.statusCode == http.StatusTooManyRequests || e.statusCode >= 500, true
+}
+
+func newWebSocketDialError(exchange string, response *http.Response, err error) *websocketDialError {
+	statusCode := 0
+	if response != nil {
+		statusCode = response.StatusCode
+	}
+	return &websocketDialError{
+		exchange:   exchange,
+		statusCode: statusCode,
+		err:        err,
+	}
+}
+
+func dialWebSocket(ctx context.Context, exchange string, url string) (*websocket.Conn, error) {
+	conn, response, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		return nil, newWebSocketDialError(exchange, response, err)
+	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
+	return conn, nil
+}
 
 const (
 	websocketSubscriptionTimeout = 10 * time.Second

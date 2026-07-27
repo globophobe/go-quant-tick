@@ -136,11 +136,10 @@ func (c *Coinbase) run(
 	errs chan<- error,
 ) error {
 	c.subscribed = false
-	conn, _, err := websocket.Dial(ctx, c.URL, nil)
+	conn, err := dialWebSocket(ctx, CoinbaseName, c.URL)
 	if err != nil {
-		return fmt.Errorf("dial coinbase websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range c.SubscriptionMessages() {

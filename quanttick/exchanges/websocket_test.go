@@ -1,16 +1,73 @@
 package exchanges
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 )
+
+func TestWebSocketDialErrorClassifiesHTTPStatus(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		want       bool
+		wantKnown  bool
+	}{
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, want: true, wantKnown: true},
+		{name: "server error", statusCode: http.StatusServiceUnavailable, want: true, wantKnown: true},
+		{name: "forbidden", statusCode: http.StatusForbidden, want: false, wantKnown: true},
+		{name: "no response", statusCode: 0, want: false, wantKnown: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var response *http.Response
+			if tc.statusCode != 0 {
+				response = &http.Response{StatusCode: tc.statusCode}
+			}
+			err := newWebSocketDialError("test", response, errors.New("dial failed"))
+			got, known := err.ClassifyTransient()
+			if got != tc.want || known != tc.wantKnown {
+				t.Fatalf("ClassifyTransient() = (%v, %v), want (%v, %v)", got, known, tc.want, tc.wantKnown)
+			}
+			if !errors.Is(err, err.err) {
+				t.Fatal("dial error does not unwrap its cause")
+			}
+		})
+	}
+}
+
+func TestDialWebSocketReturnsTypedHandshakeError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	_, err := dialWebSocket(context.Background(), "test", url)
+	if err == nil {
+		t.Fatal("dial succeeded")
+	}
+	var dialErr *websocketDialError
+	if !errors.As(err, &dialErr) {
+		t.Fatalf("error type = %T, want *websocketDialError", err)
+	}
+	transient, known := dialErr.ClassifyTransient()
+	if !known || !transient {
+		t.Fatal("503 handshake error is not transient")
+	}
+}
 
 func TestIsNormalWebSocketClose(t *testing.T) {
 	cases := []struct {

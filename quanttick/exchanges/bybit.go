@@ -150,11 +150,10 @@ func (b *Bybit) run(
 	trades chan<- quanttick.TradeEvent,
 	seen *seenTradeIDs,
 ) error {
-	conn, _, err := websocket.Dial(ctx, b.URL, nil)
+	conn, err := dialWebSocket(ctx, BybitName, b.URL)
 	if err != nil {
-		return fmt.Errorf("dial bybit websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range b.SubscriptionMessages() {

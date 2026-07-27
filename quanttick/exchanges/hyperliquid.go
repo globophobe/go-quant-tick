@@ -154,11 +154,10 @@ func (h *Hyperliquid) runWithErrors(
 	seen *seenTradeIDs,
 	errs chan<- error,
 ) error {
-	conn, _, err := websocket.Dial(ctx, h.URL, nil)
+	conn, err := dialWebSocket(ctx, HyperliquidName, h.URL)
 	if err != nil {
-		return fmt.Errorf("dial hyperliquid websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range h.SubscriptionMessages() {

@@ -459,11 +459,10 @@ func (b *Bitfinex) run(
 	errs chan<- error,
 ) error {
 	b.resetSessionState()
-	conn, _, err := websocket.Dial(ctx, b.URL, nil)
+	conn, err := dialWebSocket(ctx, BitfinexName, b.URL)
 	if err != nil {
-		return fmt.Errorf("dial bitfinex websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range b.SubscriptionMessages() {

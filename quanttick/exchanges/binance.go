@@ -197,11 +197,10 @@ func (b *Binance) run(
 	trades chan<- quanttick.TradeEvent,
 	errs chan<- error,
 ) error {
-	conn, _, err := websocket.Dial(ctx, b.URL, nil)
+	conn, err := dialWebSocket(ctx, b.name, b.URL)
 	if err != nil {
-		return fmt.Errorf("dial binance websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range b.SubscriptionMessages() {
