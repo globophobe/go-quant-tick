@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -475,6 +477,214 @@ func TestBinanceTradesReconnectsAfterSubscriptionErrorAndBuffersUntilAck(t *test
 	}
 	if got := connections.Load(); got < 2 {
 		t.Fatalf("connections = %d, want at least 2", got)
+	}
+}
+
+func TestBinanceFuturesRecoversReconnectGapBeforeWebSocketReplay(t *testing.T) {
+	recoveryStarted := make(chan struct{})
+	replaySent := make(chan struct{})
+	var recoveryRequests atomic.Int32
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recoveryRequests.Add(1)
+		close(recoveryStarted)
+		select {
+		case <-replaySent:
+		case <-r.Context().Done():
+			return
+		}
+		if r.URL.Path != "/aggTrades" {
+			t.Errorf("recovery path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("symbol"); got != "BTCUSDT" {
+			t.Errorf("recovery symbol = %s", got)
+		}
+		if got := r.URL.Query().Get("fromId"); got != "101" {
+			t.Errorf("recovery fromId = %s", got)
+		}
+		_, _ = fmt.Fprint(w, `[
+			{"a":101,"p":"101","q":"1","f":1001,"l":1001,"T":1775606401000,"m":false},
+			{"a":102,"p":"102","q":"2","f":1002,"l":1003,"T":1775606402000,"m":true}
+		]`)
+	}))
+	t.Cleanup(restServer.Close)
+
+	var connections atomic.Int32
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		if err := writeExchangeWebSocketMessage(ctx, conn, `{"result":null,"id":1}`); err != nil {
+			return err
+		}
+
+		switch connections.Add(1) {
+		case 1:
+			if err := writeExchangeWebSocketMessage(
+				ctx,
+				conn,
+				`{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":100,"p":"100","q":"1","f":1000,"l":1000,"T":1775606400000,"m":false}}`,
+			); err != nil {
+				return err
+			}
+			return conn.Close(websocket.StatusNormalClosure, "")
+		case 2:
+			select {
+			case <-recoveryStarted:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			for _, message := range []string{
+				`{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":102,"p":"102","q":"2","f":1002,"l":1003,"T":1775606402000,"m":true}}`,
+				`{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":103,"p":"103","q":"1","f":1004,"l":1004,"T":1775606403000,"m":false}}`,
+			} {
+				if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+					return err
+				}
+			}
+			close(replaySent)
+			_, _ = readExchangeWebSocketMessage(ctx, conn)
+			return nil
+		default:
+			return fmt.Errorf("unexpected connection %d", connections.Load())
+		}
+	})
+
+	exchange := NewBinanceFutures(
+		[]string{"BTCUSDT"},
+		WithBinanceURL(url),
+		WithBinanceFuturesRESTURL(restServer.URL),
+		WithBinanceReconnectDelay(time.Millisecond),
+		WithBinanceSubscriptionTimeout(time.Second),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades, errs := exchange.Trades(ctx)
+
+	var recovered []quanttick.TradeEvent
+	for len(recovered) < 4 {
+		select {
+		case trade := <-trades:
+			recovered = append(recovered, trade)
+		case err := <-errs:
+			t.Fatalf("recovery error = %v", err)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for recovered Binance Futures trades")
+		}
+	}
+	cancel()
+
+	assertStrings(t, tradeUIDs(recovered), []string{"100", "101", "102", "103"})
+	assertInts(t, tradeTicks(recovered), []int{1, 1, 2, 1})
+	assertBools(t, tradeSequential(recovered), []bool{false, true, true, true})
+	if got := recoveryRequests.Load(); got != 1 {
+		t.Fatalf("recovery requests = %d, want 1", got)
+	}
+}
+
+func TestBinanceFuturesRecoveryFailureDoesNotBlockWebSocket(t *testing.T) {
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(restServer.Close)
+
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		for _, message := range []string{
+			`{"result":null,"id":1}`,
+			`{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","a":101,"p":"101","q":"1","f":1001,"l":1001,"T":1775606401000,"m":false}}`,
+		} {
+			if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+				return err
+			}
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	exchange := NewBinanceFutures(
+		[]string{"BTCUSDT"},
+		WithBinanceURL(url),
+		WithBinanceFuturesRESTURL(restServer.URL),
+		WithBinanceSubscriptionTimeout(time.Second),
+	)
+	exchange.lastIDs["BTCUSDT"] = 100
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades := make(chan quanttick.TradeEvent, 1)
+	errs := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- exchange.run(ctx, trades, errs)
+	}()
+
+	select {
+	case err := <-errs:
+		if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+			t.Fatalf("recovery error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for recovery error")
+	}
+	select {
+	case trade := <-trades:
+		if trade.UID != "101" || !trade.IsSequential {
+			t.Fatalf("websocket trade = %#v", trade)
+		}
+	case <-ctx.Done():
+		t.Fatal("REST failure blocked websocket continuation")
+	}
+	cancel()
+	<-done
+}
+
+func TestBinanceFuturesRecoveryRetriesRateLimitResponse(t *testing.T) {
+	var requests atomic.Int32
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0.001")
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = fmt.Fprint(w, `[
+			{"a":101,"p":"101","q":"1","f":1001,"l":1001,"T":1775606401000,"m":false}
+		]`)
+	}))
+	t.Cleanup(restServer.Close)
+
+	exchange := NewBinanceFutures(
+		[]string{"BTCUSDT"},
+		WithBinanceFuturesRESTURL(restServer.URL),
+	)
+	recovered, err := exchange.recoverFuturesSymbol(
+		context.Background(),
+		"BTCUSDT",
+		101,
+		map[string]int64{"BTCUSDT": 100},
+	)
+	if err != nil {
+		t.Fatalf("recover futures symbol: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	if len(recovered) != 1 || recovered[0].tradeID != 101 {
+		t.Fatalf("recovered = %#v", recovered)
+	}
+}
+
+func TestBinanceResponseDelayUsesWeightWindow(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 34, 45, 0, time.UTC)
+	headers := make(http.Header)
+	headers.Set("X-MBX-USED-WEIGHT-1M", "1200")
+	delay, err := binanceResponseDelay(headers, now, 1200)
+	if err != nil {
+		t.Fatalf("response delay: %v", err)
+	}
+	if delay != 15*time.Second {
+		t.Fatalf("response delay = %s, want 15s", delay)
 	}
 }
 

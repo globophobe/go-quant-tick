@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,8 +23,13 @@ const (
 	BinanceFuturesName             = "binance-futures"
 	BinanceURL                     = "wss://stream.binance.com:9443/ws"
 	BinanceFuturesURL              = "wss://fstream.binance.com/market/stream"
+	BinanceFuturesRESTURL          = "https://fapi.binance.com/fapi/v1"
 	binanceSubscriptionBufferLimit = 10000
 	binanceSubscriptionRequestID   = 1
+	binanceRecoveryPageLimit       = 1000
+	binanceRecoveryMaxPages        = 100
+	binanceRecoveryMaxWeight       = 1200
+	binanceRecoveryRetryDelay      = time.Second
 )
 
 var (
@@ -33,11 +41,15 @@ type Binance struct {
 	Symbols             []string
 	name                string
 	URL                 string
+	RESTURL             string
+	HTTPClient          *http.Client
 	stream              string
 	ReconnectDelay      time.Duration
 	SubscriptionTimeout time.Duration
+	RecoveryMaxWeight   int
 
-	lastIDs map[string]int64
+	lastIDs          map[string]int64
+	recoveryThrottle *restThrottle
 }
 
 type binanceParsedTrade struct {
@@ -52,10 +64,13 @@ func NewBinance(symbols []string, options ...BinanceOption) *Binance {
 		Symbols:             append([]string(nil), symbols...),
 		name:                BinanceName,
 		URL:                 BinanceURL,
+		HTTPClient:          defaultRecoveryHTTPClient,
 		stream:              "trade",
 		ReconnectDelay:      time.Second,
 		SubscriptionTimeout: websocketSubscriptionTimeout,
+		RecoveryMaxWeight:   binanceRecoveryMaxWeight,
 		lastIDs:             make(map[string]int64),
+		recoveryThrottle:    newRESTThrottle(0),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -68,10 +83,14 @@ func NewBinanceFutures(symbols []string, options ...BinanceOption) *Binance {
 		Symbols:             append([]string(nil), symbols...),
 		name:                BinanceFuturesName,
 		URL:                 BinanceFuturesURL,
+		RESTURL:             BinanceFuturesRESTURL,
+		HTTPClient:          defaultRecoveryHTTPClient,
 		stream:              "aggTrade",
 		ReconnectDelay:      time.Second,
 		SubscriptionTimeout: websocketSubscriptionTimeout,
+		RecoveryMaxWeight:   binanceRecoveryMaxWeight,
 		lastIDs:             make(map[string]int64),
+		recoveryThrottle:    newRESTThrottle(0),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -85,6 +104,18 @@ func WithBinanceURL(url string) BinanceOption {
 	}
 }
 
+func WithBinanceFuturesRESTURL(url string) BinanceOption {
+	return func(exchange *Binance) {
+		exchange.RESTURL = url
+	}
+}
+
+func WithBinanceHTTPClient(client *http.Client) BinanceOption {
+	return func(exchange *Binance) {
+		exchange.HTTPClient = client
+	}
+}
+
 func WithBinanceReconnectDelay(delay time.Duration) BinanceOption {
 	return func(exchange *Binance) {
 		exchange.ReconnectDelay = delay
@@ -94,6 +125,12 @@ func WithBinanceReconnectDelay(delay time.Duration) BinanceOption {
 func WithBinanceSubscriptionTimeout(timeout time.Duration) BinanceOption {
 	return func(exchange *Binance) {
 		exchange.SubscriptionTimeout = timeout
+	}
+}
+
+func WithBinanceRecoveryMaxWeight(maxWeight int) BinanceOption {
+	return func(exchange *Binance) {
+		exchange.RecoveryMaxWeight = maxWeight
 	}
 }
 
@@ -112,7 +149,7 @@ func (b *Binance) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-ch
 
 		for {
 			startedAt := time.Now()
-			if err := b.run(ctx, trades); err != nil {
+			if err := b.run(ctx, trades, errs); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -183,6 +220,19 @@ func (b *Binance) parseTradeMessage(
 		}
 	}
 
+	buyerIsMaker, err := binanceBuyerIsMaker(payload)
+	if err != nil {
+		return binanceParsedTrade{}, false, err
+	}
+	return b.buildParsedTrade(msg, buyerIsMaker, receivedAt, lastIDs)
+}
+
+func (b *Binance) buildParsedTrade(
+	msg binanceTradeMessage,
+	buyerIsMaker bool,
+	receivedAt time.Time,
+	lastIDs map[string]int64,
+) (binanceParsedTrade, bool, error) {
 	price, err := quanttick.ParseDecimal(msg.Price)
 	if err != nil {
 		return binanceParsedTrade{}, false, fmt.Errorf("parse binance price: %w", err)
@@ -190,10 +240,6 @@ func (b *Binance) parseTradeMessage(
 	notional, err := quanttick.ParseDecimal(msg.Quantity)
 	if err != nil {
 		return binanceParsedTrade{}, false, fmt.Errorf("parse binance quantity: %w", err)
-	}
-	buyerIsMaker, err := binanceBuyerIsMaker(payload)
-	if err != nil {
-		return binanceParsedTrade{}, false, err
 	}
 
 	tradeID := msg.TradeID
@@ -203,7 +249,9 @@ func (b *Binance) parseTradeMessage(
 		ticks = int(msg.LastTradeID - msg.FirstTradeID + 1)
 	}
 	prevID, hadPrevID := lastIDs[msg.Symbol]
-	lastIDs[msg.Symbol] = tradeID
+	if !hadPrevID || tradeID > prevID {
+		lastIDs[msg.Symbol] = tradeID
+	}
 	tickRule := 1
 	if buyerIsMaker {
 		tickRule = -1
@@ -242,7 +290,11 @@ func (b *Binance) unwrapTradeMessage(data []byte) ([]byte, string, error) {
 	return envelope.Data, envelope.Stream, nil
 }
 
-func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
+func (b *Binance) run(
+	ctx context.Context,
+	trades chan<- quanttick.TradeEvent,
+	errs chan<- error,
+) error {
 	conn, _, err := websocket.Dial(ctx, b.URL, nil)
 	if err != nil {
 		return fmt.Errorf("dial binance websocket: %w", err)
@@ -265,50 +317,279 @@ func (b *Binance) run(ctx context.Context, trades chan<- quanttick.TradeEvent) e
 	if err != nil {
 		return err
 	}
-	for _, parsed := range buffered {
-		select {
-		case trades <- parsed.event:
-			b.lastIDs[parsed.event.Symbol] = parsed.tradeID
-		case <-ctx.Done():
-			return ctx.Err()
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	streamSequenceIDs := cloneBinanceLastIDs(sequenceIDs)
+	stream, streamErr := b.startTradeReader(streamCtx, conn, streamSequenceIDs)
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, reconnectRecoveryTimeout)
+	recovered, recoveryErr := b.recoverFuturesTrades(recoveryCtx)
+	cancelRecovery()
+	for _, parsed := range recovered {
+		if err := b.emitParsedTrade(ctx, trades, sequenceIDs, parsed); err != nil {
+			return err
 		}
 	}
+	if recoveryErr != nil {
+		sendError(ctx, errs, recoveryErr)
+	}
+	for _, parsed := range buffered {
+		if err := b.emitParsedTrade(ctx, trades, sequenceIDs, parsed); err != nil {
+			cancelStream()
+			return err
+		}
+	}
+	for parsed := range stream {
+		if err := b.emitParsedTrade(ctx, trades, sequenceIDs, parsed); err != nil {
+			cancelStream()
+			return err
+		}
+	}
+	cancelStream()
+	err = <-streamErr
+	if isNormalWebSocketClose(err) {
+		return nil
+	}
+	if err == nil {
+		return nil
+	}
+	return err
+}
 
-	for {
-		messageType, data, err := conn.Read(ctx)
-		if err != nil {
-			if isNormalWebSocketClose(err) {
-				return nil
+func (b *Binance) startTradeReader(
+	ctx context.Context,
+	conn *websocket.Conn,
+	sequenceIDs map[string]int64,
+) (<-chan binanceParsedTrade, <-chan error) {
+	trades := make(chan binanceParsedTrade, binanceSubscriptionBufferLimit)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(trades)
+		defer close(errs)
+		for {
+			messageType, data, err := conn.Read(ctx)
+			if err != nil {
+				errs <- fmt.Errorf("read binance websocket: %w", err)
+				return
 			}
-			return fmt.Errorf("read binance websocket: %w", err)
-		}
-		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
-			continue
-		}
+			if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
+				continue
+			}
 
-		isAck, err := parseBinanceSubscriptionResponse(data)
-		if err != nil {
-			return err
-		}
-		if isAck {
-			continue
-		}
+			isAck, err := parseBinanceSubscriptionResponse(data)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if isAck {
+				continue
+			}
 
-		parsed, ok, err := b.parseTradeMessage(data, time.Now().UTC(), sequenceIDs)
-		if err != nil {
-			return err
+			parsed, ok, err := b.parseTradeMessage(data, time.Now().UTC(), sequenceIDs)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !ok {
+				continue
+			}
+			select {
+			case trades <- parsed:
+			case <-ctx.Done():
+				errs <- ctx.Err()
+				return
+			default:
+				errs <- fmt.Errorf(
+					"binance websocket trade buffer exceeded %d events",
+					binanceSubscriptionBufferLimit,
+				)
+				_ = conn.CloseNow()
+				return
+			}
 		}
+	}()
+	return trades, errs
+}
+
+func (b *Binance) emitParsedTrade(
+	ctx context.Context,
+	trades chan<- quanttick.TradeEvent,
+	sequenceIDs map[string]int64,
+	parsed binanceParsedTrade,
+) error {
+	previousID, hadPreviousID := b.lastIDs[parsed.event.Symbol]
+	if hadPreviousID && parsed.tradeID <= previousID {
+		return nil
+	}
+	parsed.event.IsSequential = hadPreviousID && parsed.tradeID == previousID+1
+	if err := sendTrade(ctx, trades, parsed.event); err != nil {
+		return err
+	}
+	b.lastIDs[parsed.event.Symbol] = parsed.tradeID
+	sequenceIDs[parsed.event.Symbol] = parsed.tradeID
+	return nil
+}
+
+func (b *Binance) recoverFuturesTrades(ctx context.Context) ([]binanceParsedTrade, error) {
+	if b.name != BinanceFuturesName || len(b.lastIDs) == 0 {
+		return nil, nil
+	}
+
+	sequenceIDs := cloneBinanceLastIDs(b.lastIDs)
+	recovered := make([]binanceParsedTrade, 0)
+	var recoveryErrors []error
+	for _, symbol := range b.Symbols {
+		lastID, ok := b.lastIDs[symbol]
 		if !ok {
 			continue
 		}
-
-		select {
-		case trades <- parsed.event:
-			b.lastIDs[parsed.event.Symbol] = parsed.tradeID
-		case <-ctx.Done():
-			return ctx.Err()
+		rows, err := b.recoverFuturesSymbol(ctx, symbol, lastID+1, sequenceIDs)
+		recovered = append(recovered, rows...)
+		if err != nil {
+			recoveryErrors = append(recoveryErrors, err)
 		}
 	}
+	sort.SliceStable(recovered, func(left, right int) bool {
+		leftTrade := recovered[left]
+		rightTrade := recovered[right]
+		if !leftTrade.event.Timestamp.Equal(rightTrade.event.Timestamp) {
+			return leftTrade.event.Timestamp.Before(rightTrade.event.Timestamp)
+		}
+		if leftTrade.event.Symbol != rightTrade.event.Symbol {
+			return leftTrade.event.Symbol < rightTrade.event.Symbol
+		}
+		return leftTrade.tradeID < rightTrade.tradeID
+	})
+	return recovered, errors.Join(recoveryErrors...)
+}
+
+func (b *Binance) recoverFuturesSymbol(
+	ctx context.Context,
+	symbol string,
+	fromID int64,
+	sequenceIDs map[string]int64,
+) ([]binanceParsedTrade, error) {
+	recovered := make([]binanceParsedTrade, 0)
+	expectedID := fromID
+	for page := 0; page < binanceRecoveryMaxPages; page++ {
+		endpoint, err := url.Parse(strings.TrimRight(b.RESTURL, "/") + "/aggTrades")
+		if err != nil {
+			return recovered, fmt.Errorf("build binance futures recovery URL: %w", err)
+		}
+		query := endpoint.Query()
+		query.Set("symbol", symbol)
+		query.Set("fromId", strconv.FormatInt(expectedID, 10))
+		query.Set("limit", strconv.Itoa(binanceRecoveryPageLimit))
+		endpoint.RawQuery = query.Encode()
+
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return recovered, fmt.Errorf("build binance futures recovery request: %w", err)
+		}
+		var response *http.Response
+		for {
+			if err := b.recoveryThrottle.wait(ctx); err != nil {
+				return recovered, fmt.Errorf("wait for binance futures recovery rate limit: %w", err)
+			}
+			response, err = b.HTTPClient.Do(request)
+			if err != nil {
+				return recovered, fmt.Errorf("fetch binance futures recovery for %s: %w", symbol, err)
+			}
+			now := time.Now()
+			delay, rateErr := binanceResponseDelay(response.Header, now, b.RecoveryMaxWeight)
+			if rateErr != nil {
+				response.Body.Close()
+				return recovered, fmt.Errorf("fetch binance futures recovery for %s: %w", symbol, rateErr)
+			}
+			b.recoveryThrottle.deferFor(delay)
+			if response.StatusCode != http.StatusTooManyRequests && response.StatusCode != http.StatusTeapot {
+				break
+			}
+			response.Body.Close()
+			if delay <= 0 {
+				delay = binanceRecoveryRetryDelay
+				b.recoveryThrottle.deferFor(delay)
+			}
+		}
+		var payloads []json.RawMessage
+		if err := decodeRecoveryResponse(response, &payloads); err != nil {
+			return recovered, fmt.Errorf("fetch binance futures recovery for %s: %w", symbol, err)
+		}
+		if len(payloads) == 0 {
+			return recovered, nil
+		}
+
+		for _, payload := range payloads {
+			parsed, err := b.parseFuturesRecoveryTrade(
+				payload,
+				symbol,
+				time.Now().UTC(),
+				sequenceIDs,
+			)
+			if err != nil {
+				return recovered, err
+			}
+			if parsed.tradeID != expectedID {
+				return recovered, fmt.Errorf(
+					"binance futures recovery for %s expected aggregate trade %d, got %d",
+					symbol,
+					expectedID,
+					parsed.tradeID,
+				)
+			}
+			recovered = append(recovered, parsed)
+			expectedID++
+		}
+		if len(payloads) < binanceRecoveryPageLimit {
+			return recovered, nil
+		}
+	}
+	return recovered, fmt.Errorf(
+		"binance futures recovery for %s exceeded %d pages",
+		symbol,
+		binanceRecoveryMaxPages,
+	)
+}
+
+func binanceResponseDelay(headers http.Header, now time.Time, maxWeight int) (time.Duration, error) {
+	delay, err := retryAfterDelay(headers, now)
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(headers.Get("X-MBX-USED-WEIGHT-1M"))
+	if value == "" || maxWeight <= 0 {
+		return delay, nil
+	}
+	weight, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse X-MBX-USED-WEIGHT-1M %q: %w", value, err)
+	}
+	if weight < maxWeight {
+		return delay, nil
+	}
+	minuteDelay := now.Truncate(time.Minute).Add(time.Minute).Sub(now)
+	if minuteDelay > delay {
+		delay = minuteDelay
+	}
+	return delay, nil
+}
+
+func (b *Binance) parseFuturesRecoveryTrade(
+	payload []byte,
+	symbol string,
+	receivedAt time.Time,
+	sequenceIDs map[string]int64,
+) (binanceParsedTrade, error) {
+	var msg binanceTradeMessage
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return binanceParsedTrade{}, fmt.Errorf("parse binance futures recovery trade: %w", err)
+	}
+	msg.Symbol = symbol
+	buyerIsMaker, err := binanceBuyerIsMaker(payload)
+	if err != nil {
+		return binanceParsedTrade{}, err
+	}
+	parsed, _, err := b.buildParsedTrade(msg, buyerIsMaker, receivedAt, sequenceIDs)
+	return parsed, err
 }
 
 func (b *Binance) awaitSubscription(

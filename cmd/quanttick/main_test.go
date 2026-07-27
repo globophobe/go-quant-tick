@@ -88,6 +88,11 @@ func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t
 			want: false,
 		},
 		{
+			name: "bybit REST IP ban is not transient",
+			err:  errors.New("fetch bybit recovery for BTCUSDT: HTTP 403; HTTP recovery paused for 10m0s"),
+			want: false,
+		},
+		{
 			name: "parse error is not transient",
 			err:  errors.New("parse coinbase message: bad payload"),
 			want: false,

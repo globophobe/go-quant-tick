@@ -2,7 +2,10 @@ package exchanges
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -273,7 +276,27 @@ func TestHyperliquidRunBuffersUntilAllAcksAndSendsHeartbeat(t *testing.T) {
 	}
 }
 
-func TestHyperliquidTradesDeduplicatesReconnectReplay(t *testing.T) {
+func TestHyperliquidRecoversReconnectGapBeforeSnapshotReplay(t *testing.T) {
+	var recoveryRequests atomic.Int32
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recoveryRequests.Add(1)
+		if r.URL.Path != "/info" {
+			t.Errorf("recovery path = %s", r.URL.Path)
+		}
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode recovery request: %v", err)
+		}
+		if request["type"] != "recentTrades" || request["coin"] != "BTC" {
+			t.Errorf("recovery request = %#v", request)
+		}
+		_, _ = fmt.Fprint(w, `[
+			{"coin":"BTC","side":"A","px":"101","sz":"2","time":1775606401000,"tid":11},
+			{"coin":"BTC","side":"B","px":"100","sz":"1","time":1775606400000,"tid":10}
+		]`)
+	}))
+	t.Cleanup(restServer.Close)
+
 	var connections atomic.Int32
 	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
 		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
@@ -287,8 +310,7 @@ func TestHyperliquidTradesDeduplicatesReconnectReplay(t *testing.T) {
 			return err
 		}
 
-		connection := connections.Add(1)
-		switch connection {
+		switch connections.Add(1) {
 		case 1:
 			if err := writeExchangeWebSocketMessage(
 				ctx,
@@ -302,44 +324,52 @@ func TestHyperliquidTradesDeduplicatesReconnectReplay(t *testing.T) {
 			if err := writeExchangeWebSocketMessage(
 				ctx,
 				conn,
-				`{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"100","sz":"1","time":1775606400000,"tid":10},{"coin":"BTC","side":"A","px":"101","sz":"1","time":1775606401000,"tid":11}]}`,
+				`{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"101","sz":"2","time":1775606401000,"tid":11},{"coin":"BTC","side":"B","px":"102","sz":"3","time":1775606402000,"tid":12}]}`,
 			); err != nil {
 				return err
 			}
 			_, _ = readExchangeWebSocketMessage(ctx, conn)
 			return nil
 		default:
-			return fmt.Errorf("unexpected connection %d", connection)
+			return fmt.Errorf("unexpected connection %d", connections.Load())
 		}
 	})
 
 	exchange := NewHyperliquid(
 		[]string{"BTC"},
 		WithHyperliquidURL(url),
+		WithHyperliquidRESTURL(restServer.URL),
 		WithHyperliquidReconnectDelay(time.Millisecond),
 		WithHyperliquidSubscriptionTimeout(time.Second),
+		WithHyperliquidHeartbeatInterval(0),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	trades, _ := exchange.Trades(ctx)
+	trades, errs := exchange.Trades(ctx)
 
 	var uids []string
-	for len(uids) < 2 {
+	for len(uids) < 3 {
 		select {
 		case trade := <-trades:
 			uids = append(uids, trade.UID)
+		case err := <-errs:
+			t.Fatalf("recovery error = %v", err)
 		case <-ctx.Done():
-			t.Fatal("timed out waiting for reconnect trades")
+			t.Fatal("timed out waiting for recovered Hyperliquid trades")
 		}
 	}
 	cancel()
 
-	want := []string{"1775606400000:BTC:10", "1775606401000:BTC:11"}
+	want := []string{
+		"1775606400000:BTC:10",
+		"1775606401000:BTC:11",
+		"1775606402000:BTC:12",
+	}
 	if !reflect.DeepEqual(uids, want) {
 		t.Fatalf("trade uids = %#v, want %#v", uids, want)
 	}
-	if got := connections.Load(); got < 2 {
-		t.Fatalf("connections = %d, want at least 2", got)
+	if got := recoveryRequests.Load(); got != 1 {
+		t.Fatalf("recovery requests = %d, want 1", got)
 	}
 }
 
@@ -349,6 +379,118 @@ func TestHyperliquidProtocolErrorSurfaces(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "Invalid subscription") {
 		t.Fatalf("protocol error = %v", err)
+	}
+}
+
+func TestHyperliquidRecentTradesExtraWeightUsesResponseRows(t *testing.T) {
+	tests := []struct {
+		rows int
+		want int
+	}{
+		{rows: 0, want: 0},
+		{rows: 1, want: 1},
+		{rows: 20, want: 1},
+		{rows: 21, want: 2},
+	}
+	for _, test := range tests {
+		if got := hyperliquidRecentTradesExtraWeight(test.rows); got != test.want {
+			t.Errorf("rows=%d extra weight=%d, want %d", test.rows, got, test.want)
+		}
+	}
+}
+
+func TestHyperliquidRecentTradesReservesResponseWeightBeforeRequest(t *testing.T) {
+	limiter := newRequestWindowLimiter(hyperliquidRateLimitWeightPerMinute, time.Minute)
+	if err := limiter.wait(context.Background(), 1180); err != nil {
+		t.Fatalf("fill recovery rate window: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := limiter.reserve(ctx, hyperliquidRecentTradesMaxWeight); err == nil {
+		t.Fatal("recentTrades request should wait when its response weight exceeds capacity")
+	}
+}
+
+func TestHyperliquidRejectsUnexpectedRecentTradesResponseSize(t *testing.T) {
+	rows := make([]string, hyperliquidRecentTradesMaxRows+1)
+	for index := range rows {
+		rows[index] = fmt.Sprintf(
+			`{"coin":"BTC","side":"A","px":"101","sz":"2","time":1775606401000,"tid":%d}`,
+			index,
+		)
+	}
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, "[%s]", strings.Join(rows, ","))
+	}))
+	t.Cleanup(restServer.Close)
+
+	exchange := NewHyperliquid(
+		[]string{"BTC"},
+		WithHyperliquidRESTURL(restServer.URL),
+	)
+	_, err := exchange.recoverSymbol(context.Background(), "BTC", "unused")
+	if err == nil || !strings.Contains(err.Error(), "expected at most 10") {
+		t.Fatalf("recovery error = %v", err)
+	}
+}
+
+func TestHyperliquidUsesWebSocketSnapshotWhenRESTCursorIsAbsent(t *testing.T) {
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `[
+			{"coin":"BTC","side":"A","px":"99","sz":"1","time":1775606399000,"tid":9}
+		]`)
+	}))
+	t.Cleanup(restServer.Close)
+
+	url := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		for _, message := range []string{
+			`{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}}`,
+			`{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"101","sz":"2","time":1775606401000,"tid":11},{"coin":"BTC","side":"B","px":"102","sz":"3","time":1775606402000,"tid":12}]}`,
+		} {
+			if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
+				return err
+			}
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	exchange := NewHyperliquid(
+		[]string{"BTC"},
+		WithHyperliquidURL(url),
+		WithHyperliquidRESTURL(restServer.URL),
+		WithHyperliquidSubscriptionTimeout(time.Second),
+		WithHyperliquidHeartbeatInterval(0),
+	)
+	exchange.lastUIDs["BTC"] = "1775606400000:BTC:10"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	trades := make(chan quanttick.TradeEvent, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- exchange.run(ctx, trades, newSeenTradeIDs(hyperliquidSeenTradeLimit))
+	}()
+
+	var uids []string
+	for len(uids) < 2 {
+		select {
+		case trade := <-trades:
+			uids = append(uids, trade.UID)
+		case err := <-done:
+			t.Fatalf("run ended before snapshot replay: %v", err)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for Hyperliquid reconnect snapshot")
+		}
+	}
+	cancel()
+	want := []string{"1775606401000:BTC:11", "1775606402000:BTC:12"}
+	if !reflect.DeepEqual(uids, want) {
+		t.Fatalf("trade uids = %#v, want %#v", uids, want)
 	}
 }
 
