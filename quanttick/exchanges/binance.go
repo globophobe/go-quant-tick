@@ -19,6 +19,7 @@ const (
 	BinanceFuturesName             = "binance-futures"
 	BinanceURL                     = "wss://stream.binance.com:9443/ws"
 	BinanceFuturesURL              = "wss://fstream.binance.com/market/stream"
+	BinanceSpotRESTURL             = "https://api.binance.com/api/v3"
 	BinanceFuturesRESTURL          = "https://fapi.binance.com/fapi/v1"
 	binanceSubscriptionBufferLimit = 10000
 	binanceSubscriptionRequestID   = 1
@@ -38,6 +39,7 @@ type Binance struct {
 	name                string
 	URL                 string
 	RESTURL             string
+	APIKey              string
 	HTTPClient          *http.Client
 	stream              string
 	ReconnectDelay      time.Duration
@@ -60,6 +62,7 @@ func NewBinance(symbols []string, options ...BinanceOption) *Binance {
 		Symbols:             append([]string(nil), symbols...),
 		name:                BinanceName,
 		URL:                 BinanceURL,
+		RESTURL:             BinanceSpotRESTURL,
 		HTTPClient:          defaultRecoveryHTTPClient,
 		stream:              "trade",
 		ReconnectDelay:      time.Second,
@@ -101,8 +104,18 @@ func WithBinanceURL(url string) BinanceOption {
 }
 
 func WithBinanceFuturesRESTURL(url string) BinanceOption {
+	return WithBinanceRESTURL(url)
+}
+
+func WithBinanceRESTURL(url string) BinanceOption {
 	return func(exchange *Binance) {
 		exchange.RESTURL = url
+	}
+}
+
+func WithBinanceAPIKey(apiKey string) BinanceOption {
+	return func(exchange *Binance) {
+		exchange.APIKey = strings.TrimSpace(apiKey)
 	}
 }
 
@@ -211,7 +224,7 @@ func (b *Binance) run(
 	streamSequenceIDs := cloneBinanceLastIDs(sequenceIDs)
 	stream, streamErr := b.startTradeReader(streamCtx, conn, streamSequenceIDs)
 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, reconnectRecoveryTimeout)
-	recovered, recoveryErr := b.recoverFuturesTrades(recoveryCtx)
+	recovered, recoveryErr := b.recoverTrades(recoveryCtx)
 	cancelRecovery()
 	for _, parsed := range recovered {
 		if err := b.emitParsedTrade(ctx, trades, sequenceIDs, parsed); err != nil {

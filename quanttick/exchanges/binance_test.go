@@ -837,3 +837,102 @@ func TestParseBinanceSubscriptionResponseRejectsProtocolFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestBinanceSpotRecoversPublicRawTrades(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Path; got != "/historicalTrades" {
+			t.Fatalf("path = %q, want /historicalTrades", got)
+		}
+		if got := request.URL.Query().Get("symbol"); got != "BTCUSDT" {
+			t.Fatalf("symbol = %q, want BTCUSDT", got)
+		}
+		if got := request.URL.Query().Get("fromId"); got != "101" {
+			t.Fatalf("fromId = %q, want 101", got)
+		}
+		if got := request.Header.Get("X-MBX-APIKEY"); got != "" {
+			t.Fatalf("unexpected API key header %q", got)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[
+			{"id":101,"price":"100","qty":"2","time":1775606401000,"isBuyerMaker":false},
+			{"id":102,"price":"101","qty":"3","time":1775606402000,"isBuyerMaker":true}
+		]`))
+	}))
+	defer server.Close()
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceRESTURL(server.URL),
+	)
+	recovered, err := exchange.recoverSpotSymbol(
+		context.Background(),
+		"BTCUSDT",
+		101,
+		map[string]int64{"BTCUSDT": 100},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 2 {
+		t.Fatalf("recovered trades = %d, want 2", len(recovered))
+	}
+	if recovered[0].tradeID != 101 || recovered[1].tradeID != 102 {
+		t.Fatalf("recovered IDs = %d,%d, want 101,102", recovered[0].tradeID, recovered[1].tradeID)
+	}
+	if recovered[0].event.Ticks != 1 || recovered[1].event.Ticks != 1 {
+		t.Fatalf("raw spot ticks = %d,%d, want 1,1", recovered[0].event.Ticks, recovered[1].event.Ticks)
+	}
+	assertInts(t, tradeTickRules([]quanttick.TradeEvent{recovered[0].event, recovered[1].event}), []int{1, -1})
+}
+
+func TestBinanceSpotRecoverySendsConfiguredAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("X-MBX-APIKEY"); got != "test-binance-key" {
+			t.Fatalf("API key header = %q, want test-binance-key", got)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceRESTURL(server.URL),
+		WithBinanceAPIKey("  test-binance-key  "),
+	)
+	recovered, err := exchange.recoverSpotSymbol(
+		context.Background(),
+		"BTCUSDT",
+		101,
+		map[string]int64{"BTCUSDT": 100},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 0 {
+		t.Fatalf("recovered trades = %d, want 0", len(recovered))
+	}
+}
+
+func TestBinanceSpotRecoveryRejectsMissingRawTradeID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[
+			{"id":102,"price":"100","qty":"1","time":1775606402000,"isBuyerMaker":false}
+		]`))
+	}))
+	defer server.Close()
+
+	exchange := NewBinance(
+		[]string{"BTCUSDT"},
+		WithBinanceRESTURL(server.URL),
+	)
+	if _, err := exchange.recoverSpotSymbol(
+		context.Background(),
+		"BTCUSDT",
+		101,
+		map[string]int64{"BTCUSDT": 100},
+	); err == nil {
+		t.Fatal("missing raw trade ID should fail recovery")
+	}
+}

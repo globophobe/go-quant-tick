@@ -232,9 +232,14 @@ type exchangeEnvConfig struct {
 
 var exchangeEnvConfigs = []exchangeEnvConfig{
 	{
-		envName:     "BINANCE_SYMBOLS",
-		exchange:    exchanges.BinanceName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinance(symbols) },
+		envName:  "BINANCE_SYMBOLS",
+		exchange: exchanges.BinanceName,
+		newExchange: func(symbols []string) quanttick.Exchange {
+			return exchanges.NewBinance(
+				symbols,
+				exchanges.WithBinanceAPIKey(os.Getenv("BINANCE_API_KEY")),
+			)
+		},
 	},
 	{
 		envName:     "BINANCE_FUTURES_SYMBOLS",
@@ -250,6 +255,11 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		envName:     "COINBASE_SYMBOLS",
 		exchange:    exchanges.CoinbaseName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
+	},
+	{
+		envName:     "DERIBIT_SYMBOLS",
+		exchange:    exchanges.DeribitName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewDeribit(symbols) },
 	},
 	{
 		envName:     "BITFINEX_SYMBOLS",

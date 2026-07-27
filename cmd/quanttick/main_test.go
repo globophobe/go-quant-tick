@@ -218,6 +218,7 @@ func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 
 func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
+	t.Setenv("BINANCE_API_KEY", "test-binance-key")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
@@ -226,7 +227,13 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	if len(clients) != 1 {
 		t.Fatalf("clients = %d, want 1", len(clients))
 	}
-
+	binance, isBinance := clients[0].(*exchanges.Binance)
+	if !isBinance {
+		t.Fatalf("client type = %T, want *exchanges.Binance", clients[0])
+	}
+	if binance.APIKey != "test-binance-key" {
+		t.Fatalf("Binance API key = %q, want test-binance-key", binance.APIKey)
+	}
 	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BinanceName, "BTCUSDT")]
 	if !ok {
 		t.Fatal("expected BTCUSDT threshold")

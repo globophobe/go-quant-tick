@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -428,4 +430,106 @@ func parseBitfinexFixture(t *testing.T, exchange *Bitfinex, messages []string, r
 		trades = append(trades, parsedTrades...)
 	}
 	return trades
+}
+
+func TestBitfinexTradesRecoversGapBeforeBufferedWebSocketTrades(t *testing.T) {
+	var connections atomic.Int32
+	wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		connection := connections.Add(1)
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		channelID := connection
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			fmt.Sprintf(`{"event":"subscribed","channel":"trades","chanId":%d,"symbol":"tBTCUSD"}`, channelID),
+		); err != nil {
+			return err
+		}
+		tradeID := 100
+		if connection == 2 {
+			tradeID = 103
+		}
+		for _, tag := range []string{"te", "tu"} {
+			if err := writeExchangeWebSocketMessage(
+				ctx,
+				conn,
+				fmt.Sprintf(`[%d,%q,[%d,1775557140000,1,100]]`, channelID, tag, tradeID),
+			); err != nil {
+				return err
+			}
+		}
+		if connection == 1 {
+			return conn.Close(websocket.StatusGoingAway, "test reconnect")
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	rest := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[
+			[103,1775557142000,1,100],
+			[102,1775557141000,1,100],
+			[100,1775557140000,1,100]
+		]`))
+	}))
+	defer rest.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	exchange := NewBitfinex(
+		[]string{"BTCUSD"},
+		WithBitfinexURL(wsURL),
+		WithBitfinexRESTURL(rest.URL),
+		WithBitfinexReconnectDelay(0),
+	)
+	exchange.recoveryThrottle = newRESTThrottle(0)
+	trades, errs := exchange.Trades(ctx)
+	var got []quanttick.TradeEvent
+	for len(got) < 3 {
+		select {
+		case trade := <-trades:
+			got = append(got, trade)
+		case err := <-errs:
+			t.Fatalf("unexpected collector error: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("wait for recovered bitfinex trades: %v", ctx.Err())
+		}
+	}
+	cancel()
+	assertStrings(t, tradeUIDs(got), []string{"100", "102", "103"})
+	assertBools(t, tradeSequential(got), []bool{false, true, true})
+}
+
+func TestBitfinexRecoveryBudgetCoversVenueRequestWindow(t *testing.T) {
+	minimum := time.Duration(bitfinexRecoveryRequestLimit-1)*bitfinexRecoveryRequestInterval + 10*time.Second
+	if bitfinexRecoveryTimeout < minimum {
+		t.Fatalf("recovery timeout = %s, want at least %s", bitfinexRecoveryTimeout, minimum)
+	}
+}
+
+func TestBitfinexRecoveryFailureMarksNextTradeNonSequential(t *testing.T) {
+	rest := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[]`))
+	}))
+	defer rest.Close()
+
+	exchange := NewBitfinex([]string{"BTCUSD"}, WithBitfinexRESTURL(rest.URL))
+	exchange.recoveryThrottle = newRESTThrottle(0)
+	exchange.lastIDs["tBTCUSD"] = 100
+	if _, err := exchange.recoverTrades(context.Background()); err == nil {
+		t.Fatal("incomplete recovery should fail")
+	}
+	exchange.channelSymbols[1] = "tBTCUSD"
+	trades := parseBitfinexFixture(t, exchange, []string{
+		`[1,"te",[103,1775557140000,1,100]]`,
+		`[1,"tu",[103,1775557140000,1,100]]`,
+		`[1,"te",[104,1775557140001,1,100]]`,
+		`[1,"tu",[104,1775557140001,1,100]]`,
+	}, time.Now().UTC())
+	assertStrings(t, tradeUIDs(trades), []string{"103", "104"})
+	assertBools(t, tradeSequential(trades), []bool{false, true})
 }

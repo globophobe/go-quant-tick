@@ -3,6 +3,8 @@ package exchanges
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -209,6 +211,7 @@ func TestCoinbaseTradesReconnectDeduplicatesLastMatchReplay(t *testing.T) {
 	exchange := NewCoinbase(
 		[]string{"BTC-USD"},
 		WithCoinbaseURL(url),
+		WithCoinbaseRESTURL(""),
 		WithCoinbaseReconnectDelay(0),
 	)
 	trades, errs := exchange.Trades(ctx)
@@ -258,4 +261,80 @@ func parseCoinbaseFixture(t *testing.T, exchange *Coinbase, messages []string, r
 		trades = append(trades, trade)
 	}
 	return trades
+}
+
+func TestCoinbaseTradesRecoversGapBeforeBufferedWebSocketTrades(t *testing.T) {
+	var connections atomic.Int32
+	wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		connection := connections.Add(1)
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			`{"type":"subscriptions","channels":[{"name":"matches","product_ids":["BTC-USD"]}]}`,
+		); err != nil {
+			return err
+		}
+		tradeID := 100
+		if connection == 2 {
+			tradeID = 102
+		}
+		if err := writeExchangeWebSocketMessage(
+			ctx,
+			conn,
+			fmt.Sprintf(
+				`{"type":"match","trade_id":%d,"product_id":"BTC-USD","time":"2026-04-08T00:00:0%dZ","price":"100","size":"1","side":"buy"}`,
+				tradeID,
+				connection-1,
+			),
+		); err != nil {
+			return err
+		}
+		if connection == 1 {
+			return conn.Close(websocket.StatusGoingAway, "test reconnect")
+		}
+		_, _ = readExchangeWebSocketMessage(ctx, conn)
+		return nil
+	})
+
+	rest := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Query().Get("after"); got != "" {
+			t.Fatalf("unexpected recovery pagination cursor %q", got)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`[
+			{"trade_id":102,"product_id":"BTC-USD","time":"2026-04-08T00:00:02Z","price":"100","size":"1","side":"buy"},
+			{"trade_id":101,"product_id":"BTC-USD","time":"2026-04-08T00:00:01Z","price":"100","size":"1","side":"buy"},
+			{"trade_id":100,"product_id":"BTC-USD","time":"2026-04-08T00:00:00Z","price":"100","size":"1","side":"buy"}
+		]`))
+	}))
+	defer rest.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	exchange := NewCoinbase(
+		[]string{"BTC-USD"},
+		WithCoinbaseURL(wsURL),
+		WithCoinbaseRESTURL(rest.URL),
+		WithCoinbaseReconnectDelay(0),
+	)
+	exchange.recoveryThrottle = newRESTThrottle(0)
+	trades, errs := exchange.Trades(ctx)
+
+	var got []quanttick.TradeEvent
+	for len(got) < 3 {
+		select {
+		case trade := <-trades:
+			got = append(got, trade)
+		case err := <-errs:
+			t.Fatalf("unexpected collector error: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("wait for recovered coinbase trades: %v", ctx.Err())
+		}
+	}
+	cancel()
+	assertStrings(t, tradeUIDs(got), []string{"100", "101", "102"})
+	assertBools(t, tradeSequential(got), []bool{false, true, true})
 }
