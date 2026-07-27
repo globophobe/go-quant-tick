@@ -82,6 +82,7 @@ BYBIT_SYMBOLS=BTCUSDT
 BITFINEX_SYMBOLS=tBTCF0:USTF0
 BITMEX_SYMBOLS=XBTUSD
 COINBASE_SYMBOLS=BTC-USD
+DERIBIT_SYMBOLS=BTC-PERPETUAL
 HYPERLIQUID_SYMBOLS=BTC
 WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
@@ -106,6 +107,7 @@ go run ./examples/binance
 go run ./examples/binance-futures
 go run ./examples/bybit
 go run ./examples/coinbase
+go run ./examples/deribit
 go run ./examples/bitfinex
 go run ./examples/bitmex
 go run ./examples/hyperliquid
@@ -131,6 +133,8 @@ Supported exchanges
 ✅ Bybit
 
 ✅ Coinbase
+
+✅ Deribit
 
 ✅ Hyperliquid
 
