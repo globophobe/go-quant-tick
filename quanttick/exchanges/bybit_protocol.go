@@ -41,7 +41,7 @@ func (b *Bybit) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quanttic
 				envelope.Topic,
 			)
 		}
-		trade, err := parseBybitTrade(rawTrade, receivedAt)
+		trade, err := b.parseTrade(rawTrade, receivedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -50,7 +50,7 @@ func (b *Bybit) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quanttic
 	return trades, nil
 }
 
-func parseBybitTrade(rawTrade bybitTrade, receivedAt time.Time) (quanttick.TradeEvent, error) {
+func (b *Bybit) parseTrade(rawTrade bybitTrade, receivedAt time.Time) (quanttick.TradeEvent, error) {
 	if rawTrade.TradeID == "" {
 		return quanttick.TradeEvent{}, fmt.Errorf("bybit trade for %q has no trade id", rawTrade.Symbol)
 	}
@@ -58,7 +58,7 @@ func parseBybitTrade(rawTrade bybitTrade, receivedAt time.Time) (quanttick.Trade
 	if err != nil {
 		return quanttick.TradeEvent{}, fmt.Errorf("parse bybit price: %w", err)
 	}
-	notional, err := quanttick.ParseDecimal(rawTrade.Size)
+	amount, err := quanttick.ParseDecimal(rawTrade.Size)
 	if err != nil {
 		return quanttick.TradeEvent{}, fmt.Errorf("parse bybit size: %w", err)
 	}
@@ -66,16 +66,24 @@ func parseBybitTrade(rawTrade bybitTrade, receivedAt time.Time) (quanttick.Trade
 	if err != nil {
 		return quanttick.TradeEvent{}, err
 	}
-	return quanttick.NewTradeEvent(quanttick.TradeEventInput{
-		Exchange:   BybitName,
+	input := quanttick.TradeEventInput{
+		Exchange:   b.name,
 		UID:        rawTrade.TradeID,
 		Symbol:     rawTrade.Symbol,
 		Timestamp:  time.UnixMilli(rawTrade.TradeTime).UTC(),
 		ReceivedAt: receivedAt,
 		Price:      price,
-		Notional:   notional,
+		Notional:   amount,
 		TickRule:   tickRule,
-	}), nil
+	}
+	if b.category == "inverse" {
+		if !price.IsPositive() {
+			return quanttick.TradeEvent{}, fmt.Errorf("invalid bybit inverse price %s", price)
+		}
+		input.Volume = &amount
+		input.Notional = amount.Div(price)
+	}
+	return quanttick.NewTradeEvent(input), nil
 }
 
 func parseBybitSubscriptionResponse(data []byte) (bool, error) {

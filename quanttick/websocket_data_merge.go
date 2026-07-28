@@ -259,7 +259,11 @@ func webSocketDataTradeLess(exchange string, stream Stream, left TradeEvent, rig
 	}
 	// These venues use opaque trade IDs rather than sortable sequences. For exact
 	// timestamp ties, retain stable feed order instead of inventing UUID ordering.
-	if exchange == "bitmex" || exchange == "bybit" || exchange == "hyperliquid" {
+	if exchange == "bitmex" ||
+		exchange == "bybit" ||
+		exchange == "bybit-linear" ||
+		exchange == "bybit-inverse" ||
+		exchange == "hyperliquid" {
 		return false
 	}
 	return tradeUIDLess(left.UID, right.UID)

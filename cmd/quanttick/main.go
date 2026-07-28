@@ -230,9 +230,19 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
 	},
 	{
-		envName:     "BYBIT_SYMBOLS",
-		exchange:    exchanges.BybitName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybit(symbols) },
+		envName:     "BYBIT_SPOT_SYMBOLS",
+		exchange:    exchanges.BybitSpotName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitSpot(symbols) },
+	},
+	{
+		envName:     "BYBIT_LINEAR_SYMBOLS",
+		exchange:    exchanges.BybitLinearName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitLinear(symbols) },
+	},
+	{
+		envName:     "BYBIT_INVERSE_SYMBOLS",
+		exchange:    exchanges.BybitInverseName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitInverse(symbols) },
 	},
 	{
 		envName:     "COINBASE_SYMBOLS",
@@ -262,6 +272,11 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 }
 
 func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, error) {
+	if legacy := strings.TrimSpace(os.Getenv("BYBIT_SYMBOLS")); legacy != "" {
+		return nil, nil, fmt.Errorf(
+			"BYBIT_SYMBOLS is no longer supported; use BYBIT_SPOT_SYMBOLS, BYBIT_LINEAR_SYMBOLS, or BYBIT_INVERSE_SYMBOLS",
+		)
+	}
 	clients := make([]quanttick.Exchange, 0, len(exchangeEnvConfigs))
 	thresholds := make(map[string]quanttick.Decimal)
 	for _, config := range exchangeEnvConfigs {
