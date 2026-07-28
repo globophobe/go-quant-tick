@@ -169,13 +169,14 @@ func (d *Deribit) run(
 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, reconnectRecoveryTimeout)
 	recovered, recoveryErr := d.recoverTrades(recoveryCtx)
 	cancelRecovery()
+	if recoveryErr != nil {
+		sendError(ctx, errs, recoveryErr)
+		recovered = nil
+	}
 	for _, parsed := range recovered {
 		if err := d.emitParsedTrade(ctx, trades, parsed); err != nil {
 			return err
 		}
-	}
-	if recoveryErr != nil {
-		sendError(ctx, errs, recoveryErr)
 	}
 	for _, parsed := range buffered {
 		err := d.emitParsedTrade(ctx, trades, parsed)

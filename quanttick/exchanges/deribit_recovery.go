@@ -29,6 +29,9 @@ func (d *Deribit) recoverTrades(ctx context.Context) ([]deribitParsedTrade, erro
 			recoveryErrors = append(recoveryErrors, err)
 		}
 	}
+	if len(recoveryErrors) > 0 {
+		return nil, errors.Join(recoveryErrors...)
+	}
 	sort.SliceStable(recovered, func(left, right int) bool {
 		if !recovered[left].event.Timestamp.Equal(recovered[right].event.Timestamp) {
 			return recovered[left].event.Timestamp.Before(recovered[right].event.Timestamp)
@@ -38,7 +41,7 @@ func (d *Deribit) recoverTrades(ctx context.Context) ([]deribitParsedTrade, erro
 		}
 		return recovered[left].sequence < recovered[right].sequence
 	})
-	return recovered, errors.Join(recoveryErrors...)
+	return recovered, nil
 }
 
 func (d *Deribit) recoverSymbol(
@@ -103,6 +106,9 @@ func (d *Deribit) recoverSymbol(
 			}
 			return recovered, nil
 		}
+		sort.SliceStable(envelope.Result.Trades, func(left, right int) bool {
+			return envelope.Result.Trades[left].TradeSequence < envelope.Result.Trades[right].TradeSequence
+		})
 		receivedAt := time.Now().UTC()
 		for _, rawTrade := range envelope.Result.Trades {
 			if rawTrade.InstrumentName != symbol {
