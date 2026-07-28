@@ -11,8 +11,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -62,9 +60,12 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		return err
 	}
 	handler := pipeline.Handle
-	if eventFlusher, ok := bucketFlusher.(interface {
-		FlushBefore(context.Context, string, string, time.Time) (int, error)
-	}); ok {
+	var flushWorker *bucketFlushWorker
+	if eventFlusher, ok := bucketFlusher.(bucketFlushBeforeer); ok {
+		flushWorker = newBucketFlushWorker(ctx, eventFlusher, flushTimeout(), func(err error) {
+			log.Printf("bucket flush error: %v", err)
+			reporter.Capture(err)
+		})
 		flushWatermarks := make(map[string]time.Time)
 		handler = func(ctx context.Context, trade quanttick.TradeEvent) error {
 			if err := pipeline.Handle(ctx, trade); err != nil {
@@ -74,8 +75,8 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 			if err := pipeline.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp); err != nil {
 				return err
 			}
-			_, err := eventFlusher.FlushBefore(ctx, trade.Exchange, trade.Symbol, flushTimestamp)
-			return err
+			flushWorker.Request(trade.Exchange, trade.Symbol, flushTimestamp)
+			return nil
 		}
 	}
 
@@ -94,6 +95,11 @@ func run(ctx context.Context, output io.Writer, publisher string, reporter error
 		if !errors.Is(ctx.Err(), context.Canceled) {
 			runErr = ctx.Err()
 		}
+	}
+	if flushWorker != nil {
+		// The complete buffer flush below supersedes any coalesced FlushBefore
+		// requests that have not completed yet.
+		flushWorker.Close()
 	}
 	if flushErr := flushPipeline(pipeline); flushErr != nil {
 		log.Printf("pipeline flush error: %v", flushErr)
@@ -141,34 +147,19 @@ func hasTradeStreams(streams map[quanttick.Stream]bool) bool {
 	return streams[quanttick.RawTrades] || streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades]
 }
 
-var websocketHandshakeStatusPattern = regexp.MustCompile(`expected handshake response status code 101 but got ([0-9]+)`)
+type transientErrorClassifier interface {
+	ClassifyTransient() (bool, bool)
+}
 
 func isTransientExchangeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isTransientWebSocketReadError(err) {
-		return true
-	}
-	text := err.Error()
-	if !strings.Contains(text, "failed to WebSocket dial") {
-		return false
-	}
-	match := websocketHandshakeStatusPattern.FindStringSubmatch(text)
-	if len(match) != 2 {
-		return false
-	}
-	status, parseErr := strconv.Atoi(match[1])
-	if parseErr != nil {
-		return false
-	}
-	return status == 429 || status >= 500
-}
-
-func isTransientWebSocketReadError(err error) bool {
-	text := err.Error()
-	if !strings.Contains(text, "read ") || !strings.Contains(text, " websocket") {
-		return false
+	var classifier transientErrorClassifier
+	if errors.As(err, &classifier) {
+		if transient, known := classifier.ClassifyTransient(); known {
+			return transient
+		}
 	}
 	if errors.Is(err, syscall.ETIMEDOUT) {
 		return true
@@ -224,9 +215,14 @@ type exchangeEnvConfig struct {
 
 var exchangeEnvConfigs = []exchangeEnvConfig{
 	{
-		envName:     "BINANCE_SYMBOLS",
-		exchange:    exchanges.BinanceName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinance(symbols) },
+		envName:  "BINANCE_SYMBOLS",
+		exchange: exchanges.BinanceName,
+		newExchange: func(symbols []string) quanttick.Exchange {
+			return exchanges.NewBinance(
+				symbols,
+				exchanges.WithBinanceAPIKey(os.Getenv("BINANCE_API_KEY")),
+			)
+		},
 	},
 	{
 		envName:     "BINANCE_FUTURES_SYMBOLS",
@@ -234,9 +230,19 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
 	},
 	{
+		envName:     "BYBIT_SYMBOLS",
+		exchange:    exchanges.BybitName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybit(symbols) },
+	},
+	{
 		envName:     "COINBASE_SYMBOLS",
 		exchange:    exchanges.CoinbaseName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewCoinbase(symbols) },
+	},
+	{
+		envName:     "DERIBIT_SYMBOLS",
+		exchange:    exchanges.DeribitName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewDeribit(symbols) },
 	},
 	{
 		envName:     "BITFINEX_SYMBOLS",
@@ -363,7 +369,9 @@ func configureDatabasePublishers(
 	if streams[quanttick.AggregatedTrades] || streams[quanttick.SignificantTrades] {
 		config.AggregatedPublisher = buffer.AggregatedPublisher()
 	}
-	if err := db.PingContext(ctx); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, flushTimeout())
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
 		return fail(fmt.Errorf("ping database: %w", err))
 	}
 	return buffer, cleanup, nil
@@ -542,4 +550,8 @@ func durationEnv(name string, defaultValue time.Duration) (time.Duration, error)
 		return 0, fmt.Errorf("parse %s: %s", name, value)
 	}
 	return duration, nil
+}
+
+func flushTimeout() time.Duration {
+	return durationEnvDefault("FLUSH_TIMEOUT", 5*time.Second)
 }

@@ -26,12 +26,13 @@ var validStreams = map[Stream]struct{}{
 type TradeHandler func(context.Context, TradeEvent) error
 type ErrorHandler func(error)
 
+// TradePipeline derives and publishes trade streams. Calls must be serialized,
+// and publishers must not call back into the pipeline.
 type TradePipeline struct {
 	RawPublisher         Publisher[TradeEvent]
 	AggregatedPublisher  Publisher[TradeEvent]
 	SignificantPublisher Publisher[SignificantTrade]
 
-	mu                    sync.Mutex
 	tradeAggregator       *TradeAggregator
 	significantAggregator *SignificantTradeAggregator
 }
@@ -67,9 +68,6 @@ func NewTradePipeline(config TradePipelineConfig) *TradePipeline {
 }
 
 func (p *TradePipeline) Handle(ctx context.Context, trade TradeEvent) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.RawPublisher != nil {
 		if err := p.RawPublisher.Publish(ctx, trade); err != nil {
 			return fmt.Errorf("publish raw trade: %w", err)
@@ -108,9 +106,6 @@ func (p *TradePipeline) Handle(ctx context.Context, trade TradeEvent) error {
 }
 
 func (p *TradePipeline) Flush(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if err := p.flushAggregatedTrades(ctx); err != nil {
 		return err
 	}
@@ -118,9 +113,6 @@ func (p *TradePipeline) Flush(ctx context.Context) error {
 }
 
 func (p *TradePipeline) FlushBefore(ctx context.Context, exchange string, symbol string, timestamp time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	boundary := timestamp.UTC().Truncate(time.Minute)
 	key := ExchangeSymbolKey(exchange, symbol)
 	if err := p.flushAggregatedTradeKeyBefore(ctx, key, boundary); err != nil {
@@ -243,18 +235,25 @@ func ValidateStreams(streams []Stream) error {
 }
 
 func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler, errorHandler ErrorHandler) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	adapterCtx, cancelAdapters := context.WithCancel(ctx)
+	defer cancelAdapters()
+
+	// Once a trade has entered the fan-in, finish handling it even if the
+	// caller cancels. The adapter context still cancels immediately so no new
+	// network work is admitted while the already-queued output drains.
+	handlerCtx := context.WithoutCancel(ctx)
+	forwardCtx, cancelForwarding := context.WithCancel(context.Background())
+	defer cancelForwarding()
 
 	trades := make(chan TradeEvent, len(clients))
 	errs := make(chan error, len(clients))
 
 	var wg sync.WaitGroup
 	for _, client := range clients {
-		tradeC, errC := client.Trades(ctx)
+		tradeC, errC := client.Trades(adapterCtx)
 		wg.Add(2)
-		go forwardTrades(ctx, &wg, tradeC, trades)
-		go forwardErrors(ctx, &wg, errC, errs)
+		go forwardTrades(forwardCtx, &wg, tradeC, trades)
+		go forwardErrors(forwardCtx, &wg, errC, errs)
 	}
 
 	go func() {
@@ -263,6 +262,8 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 		close(errs)
 	}()
 
+	ctxDone := ctx.Done()
+	var shutdownErr error
 	for trades != nil || errs != nil {
 		select {
 		case trade, ok := <-trades:
@@ -270,7 +271,7 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 				trades = nil
 				continue
 			}
-			if err := handler(ctx, trade); err != nil {
+			if err := handler(handlerCtx, trade); err != nil {
 				return err
 			}
 		case err, ok := <-errs:
@@ -281,15 +282,20 @@ func RunExchanges(ctx context.Context, clients []Exchange, handler TradeHandler,
 			if err != nil && errorHandler != nil {
 				errorHandler(err)
 			}
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil
-			}
-			return ctx.Err()
+		case <-ctxDone:
+			shutdownErr = ctx.Err()
+			cancelAdapters()
+			ctxDone = nil
 		}
 	}
 
-	return nil
+	if shutdownErr == nil {
+		shutdownErr = ctx.Err()
+	}
+	if errors.Is(shutdownErr, context.Canceled) {
+		return nil
+	}
+	return shutdownErr
 }
 
 func forwardTrades(ctx context.Context, wg *sync.WaitGroup, input <-chan TradeEvent, output chan<- TradeEvent) {

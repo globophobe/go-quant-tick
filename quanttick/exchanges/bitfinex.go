@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -16,36 +17,66 @@ import (
 )
 
 const (
-	BitfinexName = "bitfinex"
-	BitfinexURL  = "wss://api-pub.bitfinex.com/ws/2"
+	BitfinexName                    = "bitfinex"
+	BitfinexURL                     = "wss://api-pub.bitfinex.com/ws/2"
+	BitfinexRESTURL                 = "https://api-pub.bitfinex.com/v2"
+	bitfinexSubscriptionBufferLimit = 10000
+	bitfinexRecoveryPageLimit       = 10000
+	bitfinexRecoveryMaxPages        = 100
+	bitfinexRecoveryRequestLimit    = 15
+	bitfinexRecoveryRequestInterval = time.Minute / bitfinexRecoveryRequestLimit
+	bitfinexRecoveryTimeout         = (bitfinexRecoveryRequestLimit-1)*bitfinexRecoveryRequestInterval + 10*time.Second
 )
 
 var _ quanttick.Exchange = (*Bitfinex)(nil)
 
-type Bitfinex struct {
-	Symbols        []string
-	URL            string
-	ReconnectDelay time.Duration
+type bitfinexLifecycleEvent struct {
+	code    int64
+	message string
+}
 
-	channelSymbols map[int64]string
-	lastIDs        map[string]int64
-	pendingOrder   map[string][]int64
-	pendingOrderID map[string]map[int64]struct{}
-	pendingUpdates map[string]map[int64]bitfinexTradeUpdate
+func (e *bitfinexLifecycleEvent) Error() string {
+	return fmt.Sprintf("bitfinex lifecycle event %d: %s", e.code, e.message)
+}
+
+type Bitfinex struct {
+	Symbols             []string
+	URL                 string
+	RESTURL             string
+	HTTPClient          *http.Client
+	ReconnectDelay      time.Duration
+	SubscriptionTimeout time.Duration
+	RecoveryTimeout     time.Duration
+	recoveryThrottle    *restThrottle
+
+	channelSymbols    map[int64]string
+	subscribedSymbols map[string]struct{}
+	lastIDs           map[string]int64
+	pendingOrder      map[string][]int64
+	pendingOrderID    map[string]map[int64]struct{}
+	pendingUpdates    map[string]map[int64]bitfinexTradeUpdate
+	recoveryGaps      map[string]bool
 }
 
 type BitfinexOption func(*Bitfinex)
 
 func NewBitfinex(symbols []string, options ...BitfinexOption) *Bitfinex {
 	exchange := &Bitfinex{
-		Symbols:        append([]string(nil), symbols...),
-		URL:            BitfinexURL,
-		ReconnectDelay: time.Second,
-		channelSymbols: make(map[int64]string),
-		lastIDs:        make(map[string]int64),
-		pendingOrder:   make(map[string][]int64),
-		pendingOrderID: make(map[string]map[int64]struct{}),
-		pendingUpdates: make(map[string]map[int64]bitfinexTradeUpdate),
+		Symbols:             append([]string(nil), symbols...),
+		URL:                 BitfinexURL,
+		RESTURL:             BitfinexRESTURL,
+		HTTPClient:          defaultRecoveryHTTPClient,
+		ReconnectDelay:      time.Second,
+		SubscriptionTimeout: websocketSubscriptionTimeout,
+		RecoveryTimeout:     bitfinexRecoveryTimeout,
+		recoveryThrottle:    newRESTThrottle(bitfinexRecoveryRequestInterval),
+		channelSymbols:      make(map[int64]string),
+		subscribedSymbols:   make(map[string]struct{}),
+		lastIDs:             make(map[string]int64),
+		pendingOrder:        make(map[string][]int64),
+		pendingOrderID:      make(map[string]map[int64]struct{}),
+		pendingUpdates:      make(map[string]map[int64]bitfinexTradeUpdate),
+		recoveryGaps:        make(map[string]bool),
 	}
 	for _, option := range options {
 		option(exchange)
@@ -59,9 +90,33 @@ func WithBitfinexURL(url string) BitfinexOption {
 	}
 }
 
+func WithBitfinexRESTURL(url string) BitfinexOption {
+	return func(exchange *Bitfinex) {
+		exchange.RESTURL = url
+	}
+}
+
+func WithBitfinexHTTPClient(client *http.Client) BitfinexOption {
+	return func(exchange *Bitfinex) {
+		exchange.HTTPClient = client
+	}
+}
+
 func WithBitfinexReconnectDelay(delay time.Duration) BitfinexOption {
 	return func(exchange *Bitfinex) {
 		exchange.ReconnectDelay = delay
+	}
+}
+
+func WithBitfinexSubscriptionTimeout(timeout time.Duration) BitfinexOption {
+	return func(exchange *Bitfinex) {
+		exchange.SubscriptionTimeout = timeout
+	}
+}
+
+func WithBitfinexRecoveryTimeout(timeout time.Duration) BitfinexOption {
+	return func(exchange *Bitfinex) {
+		exchange.RecoveryTimeout = timeout
 	}
 }
 
@@ -76,16 +131,25 @@ func (b *Bitfinex) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-c
 	go func() {
 		defer close(trades)
 		defer close(errs)
+		backoff := newReconnectBackoff(b.ReconnectDelay)
 
 		for {
-			if err := b.run(ctx, trades); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			startedAt := time.Now()
+			if err := b.run(ctx, trades, errs); err != nil {
+				if ctx.Err() != nil {
 					return
 				}
-				sendError(ctx, errs, err)
+				var lifecycle *bitfinexLifecycleEvent
+				if errors.As(err, &lifecycle) {
+					if lifecycle.code == 20051 || lifecycle.code == 20061 {
+						continue
+					}
+				} else {
+					sendError(ctx, errs, err)
+				}
 			}
 
-			if err := sleepContext(ctx, b.ReconnectDelay); err != nil {
+			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
 				return
 			}
 		}
@@ -113,6 +177,33 @@ func (b *Bitfinex) APISymbol(symbol string) string {
 	return "t" + symbol
 }
 
+func (b *Bitfinex) resetSessionState() {
+	b.channelSymbols = make(map[int64]string)
+	b.subscribedSymbols = make(map[string]struct{})
+	b.pendingOrder = make(map[string][]int64)
+	b.pendingOrderID = make(map[string]map[int64]struct{})
+	b.pendingUpdates = make(map[string]map[int64]bitfinexTradeUpdate)
+	b.recoveryGaps = make(map[string]bool)
+}
+
+func (b *Bitfinex) requestedSymbol(symbol string) bool {
+	for _, requested := range b.Symbols {
+		if b.APISymbol(requested) == symbol {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bitfinex) subscriptionsReady() bool {
+	for _, requested := range b.Symbols {
+		if _, ok := b.subscribedSymbols[b.APISymbol(requested)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *Bitfinex) ParseTradeMessage(data []byte, receivedAt time.Time) ([]quanttick.TradeEvent, error) {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 {
@@ -134,12 +225,50 @@ func (b *Bitfinex) parseEventMessage(data []byte) ([]quanttick.TradeEvent, error
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("parse bitfinex event: %w", err)
 	}
-	if msg.Event == "subscribed" {
+
+	switch msg.Event {
+	case "subscribed":
+		if msg.Channel != "trades" {
+			return nil, fmt.Errorf("bitfinex subscribed unexpected channel %q", msg.Channel)
+		}
+		if !b.requestedSymbol(msg.Symbol) {
+			return nil, fmt.Errorf("bitfinex subscribed unexpected symbol %q", msg.Symbol)
+		}
 		channelID, err := parseRawInt64(msg.ChannelID)
 		if err != nil {
 			return nil, fmt.Errorf("parse bitfinex subscribed channel id: %w", err)
 		}
+		if existing := b.channelSymbols[channelID]; existing != "" && existing != msg.Symbol {
+			return nil, fmt.Errorf(
+				"bitfinex channel %d changed symbol from %q to %q",
+				channelID,
+				existing,
+				msg.Symbol,
+			)
+		}
 		b.channelSymbols[channelID] = msg.Symbol
+		b.subscribedSymbols[msg.Symbol] = struct{}{}
+	case "error":
+		return nil, fmt.Errorf("bitfinex protocol error %d: %s", msg.Code, msg.Message)
+	case "info":
+		if msg.Platform != nil {
+			switch msg.Platform.Status {
+			case 1:
+			case 0:
+				return nil, &bitfinexLifecycleEvent{code: 20060, message: "platform maintenance"}
+			default:
+				return nil, fmt.Errorf("bitfinex platform unavailable with status %d", msg.Platform.Status)
+			}
+		}
+		switch msg.Code {
+		case 0:
+		case 20051, 20060, 20061:
+			return nil, &bitfinexLifecycleEvent{code: msg.Code, message: msg.Message}
+		default:
+			return nil, fmt.Errorf("bitfinex info %d: %s", msg.Code, msg.Message)
+		}
+	case "unsubscribed":
+		return nil, fmt.Errorf("bitfinex channel was unsubscribed")
 	}
 	return nil, nil
 }
@@ -287,10 +416,27 @@ func (b *Bitfinex) emitReadyBitfinexTrades(symbol string) []quanttick.TradeEvent
 
 		prevID, hadPrevID := b.lastIDs[symbol]
 		b.lastIDs[symbol] = tradeID
-		trades = append(trades, newBitfinexTradeEvent(symbol, update, hadPrevID && tradeID > prevID))
+		trades = append(trades, newBitfinexTradeEvent(
+			symbol,
+			update,
+			b.bitfinexTradeIsSequential(symbol, hadPrevID, prevID, tradeID),
+		))
 	}
 	b.pendingOrder[symbol] = order
 	return trades
+}
+
+func (b *Bitfinex) bitfinexTradeIsSequential(
+	symbol string,
+	hadPrevious bool,
+	previousID int64,
+	tradeID int64,
+) bool {
+	if b.recoveryGaps[symbol] {
+		delete(b.recoveryGaps, symbol)
+		return false
+	}
+	return hadPrevious && tradeID > previousID
 }
 
 func newBitfinexTradeEvent(symbol string, update bitfinexTradeUpdate, isSequential bool) quanttick.TradeEvent {
@@ -307,12 +453,16 @@ func newBitfinexTradeEvent(symbol string, update bitfinexTradeUpdate, isSequenti
 	})
 }
 
-func (b *Bitfinex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) error {
-	conn, _, err := websocket.Dial(ctx, b.URL, nil)
+func (b *Bitfinex) run(
+	ctx context.Context,
+	trades chan<- quanttick.TradeEvent,
+	errs chan<- error,
+) error {
+	b.resetSessionState()
+	conn, err := dialWebSocket(ctx, BitfinexName, b.URL)
 	if err != nil {
-		return fmt.Errorf("dial bitfinex websocket: %w", err)
+		return err
 	}
-	conn.SetReadLimit(maxWebSocketMessageBytes)
 	defer conn.CloseNow()
 
 	for _, message := range b.SubscriptionMessages() {
@@ -325,36 +475,62 @@ func (b *Bitfinex) run(ctx context.Context, trades chan<- quanttick.TradeEvent) 
 		}
 	}
 
-	for {
-		messageType, data, err := conn.Read(ctx)
-		if err != nil {
-			if isNormalWebSocketClose(err) {
-				return nil
-			}
-			return fmt.Errorf("read bitfinex websocket: %w", err)
+	buffered, err := b.awaitSubscriptions(ctx, conn)
+	if err != nil {
+		return err
+	}
+	backlog, err := newTradeBacklog(bitfinexSubscriptionBufferLimit, len(buffered))
+	if err != nil {
+		return err
+	}
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	stream, streamErr := b.startMessageReader(streamCtx, conn, backlog)
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, b.RecoveryTimeout)
+	recovered, recoveryErr := b.recoverTrades(recoveryCtx)
+	cancelRecovery()
+	for _, trade := range recovered {
+		if err := b.emitRecoveredTrade(ctx, trades, trade); err != nil {
+			return err
 		}
-		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
-			continue
-		}
-
-		parsedTrades, err := b.ParseTradeMessage(data, time.Now().UTC())
+	}
+	if recoveryErr != nil {
+		sendError(ctx, errs, recoveryErr)
+	}
+	for _, message := range buffered {
+		err := b.emitMessageTrades(ctx, trades, message)
+		backlog.release()
 		if err != nil {
 			return err
 		}
-		for _, trade := range parsedTrades {
-			select {
-			case trades <- trade:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+	}
+	for message := range stream {
+		err := b.emitMessageTrades(ctx, trades, message)
+		backlog.release()
+		if err != nil {
+			return err
 		}
 	}
+	cancelStream()
+	err = <-streamErr
+	if isNormalWebSocketClose(err) || err == nil {
+		return nil
+	}
+	return err
 }
 
 type bitfinexEventMessage struct {
-	Event     string          `json:"event"`
-	ChannelID json.RawMessage `json:"chanId"`
-	Symbol    string          `json:"symbol"`
+	Event     string            `json:"event"`
+	Channel   string            `json:"channel"`
+	ChannelID json.RawMessage   `json:"chanId"`
+	Symbol    string            `json:"symbol"`
+	Code      int64             `json:"code"`
+	Message   string            `json:"msg"`
+	Platform  *bitfinexPlatform `json:"platform"`
+}
+
+type bitfinexPlatform struct {
+	Status int `json:"status"`
 }
 
 func parseBitfinexTag(raw json.RawMessage) (string, bool, error) {

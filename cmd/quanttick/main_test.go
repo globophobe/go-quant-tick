@@ -17,6 +17,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type testTransientExchangeError struct {
+	message   string
+	transient bool
+	known     bool
+	err       error
+}
+
+func (e testTransientExchangeError) Error() string {
+	return e.message
+}
+
+func (e testTransientExchangeError) Unwrap() error {
+	return e.err
+}
+
+func (e testTransientExchangeError) ClassifyTransient() (bool, bool) {
+	return e.transient, e.known
+}
+
 func TestWebSocketDataStreamsDefaultsToSignificantTrades(t *testing.T) {
 	t.Setenv("WEBSOCKET_DATA_STREAMS", "")
 
@@ -49,25 +68,40 @@ func TestPublisherModeNormalizesValue(t *testing.T) {
 	}
 }
 
-func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t *testing.T) {
+func TestIsTransientExchangeErrorUsesTypedAndNetworkErrors(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
 		{
-			name: "cloudflare 520",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 520"),
+			name: "typed transient error",
+			err: testTransientExchangeError{
+				message:   "temporary dial error",
+				transient: true,
+				known:     true,
+			},
 			want: true,
 		},
 		{
-			name: "server 503",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 503"),
+			name: "wrapped typed transient error",
+			err: fmt.Errorf("wrapped: %w", testTransientExchangeError{
+				message:   "temporary dial error",
+				transient: true,
+				known:     true,
+			}),
 			want: true,
 		},
 		{
-			name: "rate limited",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 429"),
+			name: "unclassified dial timeout",
+			err: testTransientExchangeError{
+				message: "dial failed",
+				err: &net.OpError{
+					Op:  "dial",
+					Net: "tcp",
+					Err: syscall.ETIMEDOUT,
+				},
+			},
 			want: true,
 		},
 		{
@@ -83,8 +117,17 @@ func TestIsTransientExchangeErrorClassifiesRetryableWebSocketHandshakeStatuses(t
 			want: true,
 		},
 		{
-			name: "forbidden is not transient",
-			err:  errors.New("dial coinbase websocket: failed to WebSocket dial: expected handshake response status code 101 but got 403"),
+			name: "typed permanent error",
+			err: testTransientExchangeError{
+				message:   "forbidden",
+				transient: false,
+				known:     true,
+			},
+			want: false,
+		},
+		{
+			name: "bybit REST IP ban is not transient",
+			err:  errors.New("fetch bybit recovery for BTCUSDT: HTTP 403; HTTP recovery paused for 10m0s"),
 			want: false,
 		},
 		{
@@ -213,6 +256,7 @@ func TestExchangeSymbolsEnvParsesThresholdOverrides(t *testing.T) {
 
 func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	t.Setenv("BINANCE_SYMBOLS", "BTCUSDT=50000,ETHUSDT")
+	t.Setenv("BINANCE_API_KEY", "test-binance-key")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
@@ -221,7 +265,13 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 	if len(clients) != 1 {
 		t.Fatalf("clients = %d, want 1", len(clients))
 	}
-
+	binance, isBinance := clients[0].(*exchanges.Binance)
+	if !isBinance {
+		t.Fatalf("client type = %T, want *exchanges.Binance", clients[0])
+	}
+	if binance.APIKey != "test-binance-key" {
+		t.Fatalf("Binance API key = %q, want test-binance-key", binance.APIKey)
+	}
 	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BinanceName, "BTCUSDT")]
 	if !ok {
 		t.Fatal("expected BTCUSDT threshold")
@@ -233,13 +283,14 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 
 func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
+	t.Setenv("BYBIT_SYMBOLS", "BTCUSDT=30000")
 	t.Setenv("HYPERLIQUID_SYMBOLS", "BTC,PURR/USDC=25000")
 
 	clients, thresholds, err := exchangesFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := 2
+	wantClients := 3
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
@@ -250,6 +301,13 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	}
 	if !threshold.Equal(quanttick.MustDecimal("25000")) {
 		t.Fatalf("threshold = %s, want 25000", threshold)
+	}
+	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.BybitName, "BTCUSDT")]
+	if !ok {
+		t.Fatal("expected Bybit BTCUSDT threshold")
+	}
+	if !threshold.Equal(quanttick.MustDecimal("30000")) {
+		t.Fatalf("threshold = %s, want 30000", threshold)
 	}
 	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.HyperliquidName, "PURR/USDC")]
 	if !ok {
@@ -327,4 +385,20 @@ func testCommandTrade(uid string, exchange string, symbol string, timestamp time
 		TickRule:     1,
 		IsSequential: true,
 	})
+}
+
+func TestFlushTimeoutReadsDuration(t *testing.T) {
+	t.Setenv("FLUSH_TIMEOUT", "3s")
+
+	if got := flushTimeout(); got != 3*time.Second {
+		t.Fatalf("timeout = %s, want 3s", got)
+	}
+}
+
+func TestFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
+	t.Setenv("FLUSH_TIMEOUT", "bad")
+
+	if got := flushTimeout(); got != 5*time.Second {
+		t.Fatalf("timeout = %s, want 5s", got)
+	}
 }

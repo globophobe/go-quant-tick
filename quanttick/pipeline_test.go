@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -256,6 +257,158 @@ func TestValidateStreamsRejectsUnknownStream(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
+}
+
+func TestRunExchangesForwardsTradesAndErrors(t *testing.T) {
+	tradeInput := make(chan TradeEvent, 1)
+	errorInput := make(chan error, 1)
+	wantTrade := testTrade("forwarded", time.Date(2026, 4, 8, 1, 2, 3, 0, time.UTC))
+	wantError := errors.New("temporary exchange error")
+	tradeInput <- wantTrade
+	errorInput <- wantError
+	close(tradeInput)
+	close(errorInput)
+
+	var handled []TradeEvent
+	var reported []error
+	err := RunExchanges(
+		context.Background(),
+		[]Exchange{testChannelExchange{trades: tradeInput, errs: errorInput}},
+		func(_ context.Context, trade TradeEvent) error {
+			handled = append(handled, trade)
+			return nil
+		},
+		func(err error) {
+			reported = append(reported, err)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handled) != 1 || handled[0].UID != wantTrade.UID {
+		t.Fatalf("handled trades = %#v, want UID %q", handled, wantTrade.UID)
+	}
+	if len(reported) != 1 || !errors.Is(reported[0], wantError) {
+		t.Fatalf("reported errors = %v, want %v", reported, wantError)
+	}
+}
+
+func TestRunExchangesReturnsHandlerError(t *testing.T) {
+	tradeInput := make(chan TradeEvent, 1)
+	errorInput := make(chan error)
+	tradeInput <- testTrade("rejected", time.Date(2026, 4, 8, 1, 2, 3, 0, time.UTC))
+	close(tradeInput)
+	close(errorInput)
+	want := errors.New("handler failed")
+
+	err := RunExchanges(
+		context.Background(),
+		[]Exchange{testChannelExchange{trades: tradeInput, errs: errorInput}},
+		func(context.Context, TradeEvent) error { return want },
+		nil,
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v, want %v", err, want)
+	}
+}
+
+func TestRunExchangesTreatsCancellationAsCleanShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	trades := make(chan TradeEvent)
+	errs := make(chan error)
+	close(trades)
+	close(errs)
+
+	err := RunExchanges(
+		ctx,
+		[]Exchange{testChannelExchange{trades: trades, errs: errs}},
+		func(context.Context, TradeEvent) error {
+			t.Fatal("handler called without a queued trade")
+			return nil
+		},
+		func(error) { t.Fatal("error handler called without a queued error") },
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+}
+
+func TestRunExchangesDrainsBufferedTradesAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	trades := make(chan TradeEvent, 2)
+	errs := make(chan error, 1)
+	trades <- testTrade("first", time.Date(2026, 4, 8, 1, 2, 3, 0, time.UTC))
+	trades <- testTrade("second", time.Date(2026, 4, 8, 1, 2, 4, 0, time.UTC))
+	errs <- errors.New("queued exchange error")
+	close(trades)
+	close(errs)
+	cancel()
+
+	var handled []string
+	var reported int
+	err := RunExchanges(
+		ctx,
+		[]Exchange{testChannelExchange{trades: trades, errs: errs}},
+		func(handlerCtx context.Context, trade TradeEvent) error {
+			if handlerCtx.Err() != nil {
+				t.Fatalf("drain handler context = %v, want active", handlerCtx.Err())
+			}
+			handled = append(handled, trade.UID)
+			return nil
+		},
+		func(error) { reported++ },
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(handled, []string{"first", "second"}) {
+		t.Fatalf("handled trades = %#v", handled)
+	}
+	if reported != 1 {
+		t.Fatalf("reported errors = %d, want 1", reported)
+	}
+}
+
+func TestRunExchangesDrainsBufferedTradesBeforeReturningDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	trades := make(chan TradeEvent, 1)
+	errs := make(chan error)
+	trades <- testTrade("deadline", time.Date(2026, 4, 8, 1, 2, 3, 0, time.UTC))
+	close(trades)
+	close(errs)
+
+	var handled []string
+	err := RunExchanges(
+		ctx,
+		[]Exchange{testChannelExchange{trades: trades, errs: errs}},
+		func(handlerCtx context.Context, trade TradeEvent) error {
+			if handlerCtx.Err() != nil {
+				t.Fatalf("drain handler context = %v, want active", handlerCtx.Err())
+			}
+			handled = append(handled, trade.UID)
+			return nil
+		},
+		nil,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if !reflect.DeepEqual(handled, []string{"deadline"}) {
+		t.Fatalf("handled trades = %#v", handled)
+	}
+}
+
+type testChannelExchange struct {
+	trades <-chan TradeEvent
+	errs   <-chan error
+}
+
+func (testChannelExchange) Name() string { return "test" }
+
+func (e testChannelExchange) Trades(context.Context) (<-chan TradeEvent, <-chan error) {
+	return e.trades, e.errs
 }
 
 type memoryPublisher[T any] struct {

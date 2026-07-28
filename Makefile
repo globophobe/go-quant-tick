@@ -21,7 +21,7 @@ BUILD_DIR ?= bin
 ARTIFACT_NAME ?= quanttick-$(TARGET_OS)-$(TARGET_ARCH)
 ARTIFACT_SOURCE := $(BUILD_DIR)/$(ARTIFACT_NAME)
 SERVICE_ENV ?=
-SERVICE_ENV_VARS := WEBSOCKET_DATA_STREAMS SIGNIFICANT_TRADE_FILTER BINANCE_SYMBOLS BINANCE_FUTURES_SYMBOLS BITFINEX_SYMBOLS BITMEX_SYMBOLS COINBASE_SYMBOLS HYPERLIQUID_SYMBOLS PRODUCTION_DATABASE_HOST DATABASE_USER DATABASE_NAME FLUSH_TIMEOUT SHUTDOWN_FLUSH_TIMEOUT SENTRY_DSN
+SERVICE_ENV_VARS := WEBSOCKET_DATA_STREAMS SIGNIFICANT_TRADE_FILTER BINANCE_SYMBOLS BINANCE_API_KEY BINANCE_FUTURES_SYMBOLS BYBIT_SYMBOLS BITFINEX_SYMBOLS BITMEX_SYMBOLS COINBASE_SYMBOLS DERIBIT_SYMBOLS HYPERLIQUID_SYMBOLS PRODUCTION_DATABASE_HOST DATABASE_USER DATABASE_NAME FLUSH_TIMEOUT SHUTDOWN_FLUSH_TIMEOUT SENTRY_DSN
 
 STARTUP_SCRIPT := deploy/startup.sh
 
@@ -120,12 +120,20 @@ update-binary: upload-artifact
 	@$(load_env); \
 	$(require_project_id); \
 	$(write_service_env); \
-	gcloud compute instances add-metadata "$(INSTANCE)" \
+	if ! gcloud compute instances add-metadata "$(INSTANCE)" \
 		--project "$$project_id" \
 		--zone "$(ZONE)" \
 		--metadata-from-file startup-script="$(STARTUP_SCRIPT)",SERVICE_ENV="$$service_env_file" \
-		--metadata ARTIFACT_PROJECT_ID="$$project_id",ARTIFACT_LOCATION="$(ARTIFACT_LOCATION)",ARTIFACT_REPOSITORY="$(ARTIFACT_REPOSITORY)",ARTIFACT_PACKAGE="$(ARTIFACT_PACKAGE)",ARTIFACT_VERSION="$(ARTIFACT_VERSION)",ARTIFACT_NAME="$(ARTIFACT_NAME)"; \
-	rm -f "$$service_env_file"; \
-	gcloud compute instances reset "$(INSTANCE)" \
+		--metadata ARTIFACT_PROJECT_ID="$$project_id",ARTIFACT_LOCATION="$(ARTIFACT_LOCATION)",ARTIFACT_REPOSITORY="$(ARTIFACT_REPOSITORY)",ARTIFACT_PACKAGE="$(ARTIFACT_PACKAGE)",ARTIFACT_VERSION="$(ARTIFACT_VERSION)",ARTIFACT_NAME="$(ARTIFACT_NAME)"; then \
+		rm -f "$$service_env_file"; \
+		exit 1; \
+	fi; \
+	rm -f "$$service_env_file" && \
+	gcloud compute instances stop "$(INSTANCE)" \
+		--quiet \
+		--project "$$project_id" \
+		--zone "$(ZONE)" && \
+	gcloud compute instances start "$(INSTANCE)" \
+		--quiet \
 		--project "$$project_id" \
 		--zone "$(ZONE)"
