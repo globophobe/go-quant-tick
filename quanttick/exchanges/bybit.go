@@ -13,12 +13,18 @@ import (
 )
 
 const (
-	BybitName                    = "bybit"
-	BybitURL                     = "wss://stream.bybit.com/v5/public/linear"
+	BybitSpotName                = "bybit"
+	BybitLinearName              = "bybit-linear"
+	BybitInverseName             = "bybit-inverse"
+	BybitSpotURL                 = "wss://stream.bybit.com/v5/public/spot"
+	BybitLinearURL               = "wss://stream.bybit.com/v5/public/linear"
+	BybitInverseURL              = "wss://stream.bybit.com/v5/public/inverse"
 	BybitRESTURL                 = "https://api.bybit.com"
 	bybitSubscriptionRequestID   = "trades"
 	bybitSeenTradeLimit          = 10000
 	bybitSubscriptionBufferLimit = 10000
+	bybitSpotRecoveryLimit       = 60
+	bybitDerivativeRecoveryLimit = 1000
 	bybitHeartbeatInterval       = 20 * time.Second
 	bybitRecoveryRetryDelay      = 250 * time.Millisecond
 	bybitRecoveryRateLimitDelay  = time.Second
@@ -29,7 +35,16 @@ const (
 
 var _ quanttick.Exchange = (*Bybit)(nil)
 
+var sharedBybitRecoveryIPLimiter = newRequestWindowLimiter(
+	bybitIPRequestLimit,
+	bybitIPRequestWindow,
+)
+
+var sharedBybitRecoveryIPThrottle = newRESTThrottle(0)
+
 type Bybit struct {
+	name                string
+	category            string
 	Symbols             []string
 	URL                 string
 	RESTURL             string
@@ -39,15 +54,24 @@ type Bybit struct {
 	HeartbeatInterval   time.Duration
 	lastUIDs            map[string]string
 	recoveryThrottle    *restThrottle
+	recoveryIPThrottle  *restThrottle
 	recoveryIPLimiter   *requestWindowLimiter
 }
 
 type BybitOption func(*Bybit)
 
-func NewBybit(symbols []string, options ...BybitOption) *Bybit {
+func newBybit(
+	name string,
+	category string,
+	url string,
+	symbols []string,
+	options ...BybitOption,
+) *Bybit {
 	exchange := &Bybit{
+		name:                name,
+		category:            category,
 		Symbols:             append([]string(nil), symbols...),
-		URL:                 BybitURL,
+		URL:                 url,
 		RESTURL:             BybitRESTURL,
 		HTTPClient:          defaultRecoveryHTTPClient,
 		ReconnectDelay:      time.Second,
@@ -55,12 +79,25 @@ func NewBybit(symbols []string, options ...BybitOption) *Bybit {
 		HeartbeatInterval:   bybitHeartbeatInterval,
 		lastUIDs:            make(map[string]string),
 		recoveryThrottle:    newRESTThrottle(0),
-		recoveryIPLimiter:   newRequestWindowLimiter(bybitIPRequestLimit, bybitIPRequestWindow),
+		recoveryIPThrottle:  sharedBybitRecoveryIPThrottle,
+		recoveryIPLimiter:   sharedBybitRecoveryIPLimiter,
 	}
 	for _, option := range options {
 		option(exchange)
 	}
 	return exchange
+}
+
+func NewBybitSpot(symbols []string, options ...BybitOption) *Bybit {
+	return newBybit(BybitSpotName, "spot", BybitSpotURL, symbols, options...)
+}
+
+func NewBybitLinear(symbols []string, options ...BybitOption) *Bybit {
+	return newBybit(BybitLinearName, "linear", BybitLinearURL, symbols, options...)
+}
+
+func NewBybitInverse(symbols []string, options ...BybitOption) *Bybit {
+	return newBybit(BybitInverseName, "inverse", BybitInverseURL, symbols, options...)
 }
 
 func WithBybitURL(url string) BybitOption {
@@ -100,7 +137,7 @@ func WithBybitHeartbeatInterval(interval time.Duration) BybitOption {
 }
 
 func (b *Bybit) Name() string {
-	return BybitName
+	return b.name
 }
 
 func (b *Bybit) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-chan error) {
@@ -150,7 +187,7 @@ func (b *Bybit) run(
 	trades chan<- quanttick.TradeEvent,
 	seen *seenTradeIDs,
 ) error {
-	conn, err := dialWebSocket(ctx, BybitName, b.URL)
+	conn, err := dialWebSocket(ctx, b.name, b.URL)
 	if err != nil {
 		return err
 	}

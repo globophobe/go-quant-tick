@@ -6,6 +6,6 @@ import (
 )
 
 func main() {
-	symbols := example.SymbolsEnv("BYBIT_SYMBOLS", exchanges.BybitName, []string{"BTCUSDT"})
-	example.Run(exchanges.NewBybit(symbols.Symbols), symbols.Thresholds)
+	symbols := example.SymbolsEnv("BYBIT_LINEAR_SYMBOLS", exchanges.BybitLinearName, []string{"BTCUSDT"})
+	example.Run(exchanges.NewBybitLinear(symbols.Symbols), symbols.Thresholds)
 }

@@ -230,9 +230,19 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceFutures(symbols) },
 	},
 	{
-		envName:     "BYBIT_SYMBOLS",
-		exchange:    exchanges.BybitName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybit(symbols) },
+		envName:     "BYBIT_SPOT_SYMBOLS",
+		exchange:    exchanges.BybitSpotName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitSpot(symbols) },
+	},
+	{
+		envName:     "BYBIT_LINEAR_SYMBOLS",
+		exchange:    exchanges.BybitLinearName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitLinear(symbols) },
+	},
+	{
+		envName:     "BYBIT_INVERSE_SYMBOLS",
+		exchange:    exchanges.BybitInverseName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBybitInverse(symbols) },
 	},
 	{
 		envName:     "COINBASE_SYMBOLS",

@@ -111,6 +111,51 @@ func TestDeribitRejectsUnexpectedChannelsAndSequenceGapsInRecovery(t *testing.T)
 	}
 }
 
+func TestDeribitRecoveryDiscardsPartialRowsOnError(t *testing.T) {
+	var requests atomic.Int32
+	rest := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if requests.Add(1) == 1 {
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","result":{"trades":[
+				{"trade_seq":102,"timestamp":1785110400002,"price":50000,"amount":100,"direction":"buy","instrument_name":"BTC-PERPETUAL"},
+				{"trade_seq":101,"timestamp":1785110400001,"price":50000,"amount":100,"direction":"buy","instrument_name":"BTC-PERPETUAL"}
+			],"has_more":true}}`))
+			return
+		}
+		if got := request.URL.Query().Get("start_seq"); got != "103" {
+			t.Fatalf("start_seq = %q, want 103", got)
+		}
+		http.Error(response, "recovery failed", http.StatusInternalServerError)
+	}))
+	defer rest.Close()
+
+	exchange := NewDeribit([]string{"BTC-PERPETUAL"}, WithDeribitRESTURL(rest.URL))
+	exchange.recoveryThrottle = newRESTThrottle(0)
+	exchange.lastSequences["BTC-PERPETUAL"] = 100
+	recovered, err := exchange.recoverTrades(context.Background())
+	if err == nil {
+		t.Fatal("partial recovery should fail")
+	}
+	if len(recovered) != 0 {
+		t.Fatalf("recovered %d partial trades, want none", len(recovered))
+	}
+
+	parsed, err := exchange.parseTradeMessage(
+		[]byte(`{"jsonrpc":"2.0","method":"subscription","params":{"channel":"trades.BTC-PERPETUAL.100ms","data":[{"trade_seq":103,"timestamp":1785110400003,"price":50000,"amount":100,"direction":"buy","instrument_name":"BTC-PERPETUAL"}]}}`),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trades := make(chan quanttick.TradeEvent, 1)
+	if err := exchange.emitParsedTrade(context.Background(), trades, parsed[0]); err != nil {
+		t.Fatal(err)
+	}
+	if trade := <-trades; trade.IsSequential {
+		t.Fatal("first buffered trade after failed recovery should be non-sequential")
+	}
+}
+
 func TestDeribitTradesRecoversGapBeforeBufferedWebSocketTrades(t *testing.T) {
 	var connections atomic.Int32
 	wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {

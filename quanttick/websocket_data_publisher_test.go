@@ -178,31 +178,35 @@ func TestWebSocketDataTradesPreserveBitmexFeedOrderForEqualTimestamps(t *testing
 }
 
 func TestWebSocketDataTradesPreserveBybitFeedOrderForEqualTimestamps(t *testing.T) {
-	timestamp := time.Now().UTC().Truncate(time.Millisecond)
-	incoming := []TradeEvent{
-		testTrade(
-			"bbb107e9-f7e8-53f3-b18a-ac9781c6eae8",
-			timestamp,
-			withExchange("bybit"),
-			withSymbol("BTCUSDT"),
-		),
-		testTrade(
-			"aaa107e9-f7e8-53f3-b18a-ac9781c6eae8",
-			timestamp,
-			withExchange("bybit"),
-			withSymbol("BTCUSDT"),
-		),
-	}
+	for _, exchange := range []string{"bybit", "bybit-linear", "bybit-inverse"} {
+		t.Run(exchange, func(t *testing.T) {
+			timestamp := time.Now().UTC().Truncate(time.Millisecond)
+			incoming := []TradeEvent{
+				testTrade(
+					"bbb107e9-f7e8-53f3-b18a-ac9781c6eae8",
+					timestamp,
+					withExchange(exchange),
+					withSymbol("BTCUSDT"),
+				),
+				testTrade(
+					"aaa107e9-f7e8-53f3-b18a-ac9781c6eae8",
+					timestamp,
+					withExchange(exchange),
+					withSymbol("BTCUSDT"),
+				),
+			}
 
-	var inserted []TradeEvent
-	var seen map[string]struct{}
-	for _, trade := range incoming {
-		inserted, seen = insertWebSocketDataTrade("bybit", RawTrades, inserted, seen, trade)
-	}
-	assertTradeUIDs(t, inserted, []string{incoming[0].UID, incoming[1].UID})
+			var inserted []TradeEvent
+			var seen map[string]struct{}
+			for _, trade := range incoming {
+				inserted, seen = insertWebSocketDataTrade(exchange, RawTrades, inserted, seen, trade)
+			}
+			assertTradeUIDs(t, inserted, []string{incoming[0].UID, incoming[1].UID})
 
-	canonical := canonicalWebSocketDataTrades("bybit", RawTrades, incoming)
-	assertTradeUIDs(t, canonical, []string{incoming[0].UID, incoming[1].UID})
+			canonical := canonicalWebSocketDataTrades(exchange, RawTrades, incoming)
+			assertTradeUIDs(t, canonical, []string{incoming[0].UID, incoming[1].UID})
+		})
+	}
 }
 
 func TestWebSocketDataTradesPreserveHyperliquidFeedOrderForEqualTimestamps(t *testing.T) {

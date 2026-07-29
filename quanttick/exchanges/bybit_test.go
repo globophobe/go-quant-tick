@@ -19,7 +19,7 @@ import (
 )
 
 func TestBybitSubscriptionMessages(t *testing.T) {
-	exchange := NewBybit([]string{"BTCUSDT", "ETHUSDT"})
+	exchange := NewBybitLinear([]string{"BTCUSDT", "ETHUSDT"})
 
 	got := exchange.SubscriptionMessages()
 	want := []map[string]any{
@@ -32,16 +32,49 @@ func TestBybitSubscriptionMessages(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("subscription messages = %#v, want %#v", got, want)
 	}
-	if exchange.Name() != BybitName {
-		t.Fatalf("name = %s, want %s", exchange.Name(), BybitName)
+	if exchange.Name() != BybitLinearName {
+		t.Fatalf("name = %s, want %s", exchange.Name(), BybitLinearName)
 	}
-	if exchange.URL != BybitURL {
-		t.Fatalf("url = %s, want %s", exchange.URL, BybitURL)
+	if exchange.URL != BybitLinearURL {
+		t.Fatalf("url = %s, want %s", exchange.URL, BybitLinearURL)
+	}
+}
+
+func TestBybitProductConstructors(t *testing.T) {
+	tests := []struct {
+		name     string
+		exchange *Bybit
+		wantName string
+		category string
+		url      string
+	}{
+		{"spot", NewBybitSpot([]string{"BTCUSDT"}), BybitSpotName, "spot", BybitSpotURL},
+		{"linear", NewBybitLinear([]string{"BTCUSDT"}), BybitLinearName, "linear", BybitLinearURL},
+		{"inverse", NewBybitInverse([]string{"BTCUSD"}), BybitInverseName, "inverse", BybitInverseURL},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.exchange.Name() != test.wantName {
+				t.Fatalf("name = %s, want %s", test.exchange.Name(), test.wantName)
+			}
+			if test.exchange.category != test.category {
+				t.Fatalf("category = %s, want %s", test.exchange.category, test.category)
+			}
+			if test.exchange.URL != test.url {
+				t.Fatalf("URL = %s, want %s", test.exchange.URL, test.url)
+			}
+			if test.exchange.recoveryIPLimiter != sharedBybitRecoveryIPLimiter {
+				t.Fatal("Bybit adapters must share the IP request limiter")
+			}
+			if test.exchange.recoveryIPThrottle != sharedBybitRecoveryIPThrottle {
+				t.Fatal("Bybit adapters must share the IP embargo throttle")
+			}
+		})
 	}
 }
 
 func TestBybitParseTradeMessages(t *testing.T) {
-	exchange := NewBybit([]string{"BTCUSDT"})
+	exchange := NewBybitLinear([]string{"BTCUSDT"})
 	receivedAt := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
 
 	trades, err := exchange.ParseTradeMessage(
@@ -61,7 +94,7 @@ func TestBybitParseTradeMessages(t *testing.T) {
 	}
 
 	assertStrings(t, tradeUIDs(trades), []string{"019trade-a", "019trade-b"})
-	assertStrings(t, tradeExchanges(trades), []string{BybitName, BybitName})
+	assertStrings(t, tradeExchanges(trades), []string{BybitLinearName, BybitLinearName})
 	assertStrings(t, tradeSymbols(trades), []string{"BTCUSDT", "BTCUSDT"})
 	assertInts(t, tradeTickRules(trades), []int{1, -1})
 	assertDecimals(t, tradePrices(trades), []string{"6698.5", "6698"})
@@ -83,8 +116,28 @@ func TestBybitParseTradeMessages(t *testing.T) {
 	}
 }
 
+func TestBybitInverseTradeNormalizesUSDContractsToBTC(t *testing.T) {
+	exchange := NewBybitInverse([]string{"BTCUSD"})
+	trades, err := exchange.ParseTradeMessage(
+		[]byte(`{
+			"topic":"publicTrade.BTCUSD",
+			"type":"snapshot",
+			"data":[
+				{"T":1784937600000,"s":"BTCUSD","S":"Buy","v":"1000","p":"50000","i":"inverse-trade","seq":123}
+			]
+		}`),
+		time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStrings(t, tradeExchanges(trades), []string{BybitInverseName})
+	assertDecimals(t, tradeNotionals(trades), []string{"0.02"})
+	assertDecimals(t, tradeVolumes(trades), []string{"1000"})
+}
+
 func TestBybitParseIgnoresNonTradeMessages(t *testing.T) {
-	exchange := NewBybit([]string{"BTCUSDT"})
+	exchange := NewBybitLinear([]string{"BTCUSDT"})
 	messages := []string{
 		`{"success":true,"ret_msg":"","req_id":"trades","op":"subscribe"}`,
 		`{"success":true,"ret_msg":"pong","op":"ping"}`,
@@ -102,7 +155,7 @@ func TestBybitParseIgnoresNonTradeMessages(t *testing.T) {
 }
 
 func TestBybitRejectsUnexpectedTopicSymbolAndSide(t *testing.T) {
-	exchange := NewBybit([]string{"BTCUSDT"})
+	exchange := NewBybitLinear([]string{"BTCUSDT"})
 	cases := []struct {
 		name    string
 		message string
@@ -185,7 +238,7 @@ func TestBybitRunBuffersUntilAckAndSendsHeartbeat(t *testing.T) {
 		return conn.Close(websocket.StatusNormalClosure, "")
 	})
 
-	exchange := NewBybit(
+	exchange := NewBybitLinear(
 		[]string{"BTCUSDT"},
 		WithBybitURL(url),
 		WithBybitSubscriptionTimeout(time.Second),
@@ -303,7 +356,7 @@ func TestBybitRecoversReconnectGapBeforeWebSocketReplay(t *testing.T) {
 		}
 	})
 
-	exchange := NewBybit(
+	exchange := NewBybitLinear(
 		[]string{"BTCUSDT"},
 		WithBybitURL(url),
 		WithBybitRESTURL(restServer.URL),
@@ -366,7 +419,7 @@ func TestBybitRejectsRecoveryWithoutRESTToWebSocketOverlap(t *testing.T) {
 		return nil
 	})
 
-	exchange := NewBybit(
+	exchange := NewBybitLinear(
 		[]string{"BTCUSDT"},
 		WithBybitURL(url),
 		WithBybitRESTURL(restServer.URL),
@@ -444,7 +497,7 @@ func TestBybitQuietSymbolDoesNotBlockActiveSymbolRecovery(t *testing.T) {
 		return nil
 	})
 
-	exchange := NewBybit(
+	exchange := NewBybitLinear(
 		[]string{"BTCUSDT", "QUIETUSDT"},
 		WithBybitURL(url),
 		WithBybitRESTURL(restServer.URL),
@@ -504,7 +557,7 @@ func TestBybitRecoveryRetriesAPIRateLimit(t *testing.T) {
 	}))
 	t.Cleanup(restServer.Close)
 
-	exchange := NewBybit([]string{"BTCUSDT"}, WithBybitRESTURL(restServer.URL))
+	exchange := NewBybitLinear([]string{"BTCUSDT"}, WithBybitRESTURL(restServer.URL))
 	recovered, err := exchange.recoverSymbol(context.Background(), "BTCUSDT", "a")
 	if err != nil {
 		t.Fatalf("recover symbol: %v", err)
@@ -539,20 +592,34 @@ func TestBybitRecoveryPausesHTTPAfterForbiddenResponse(t *testing.T) {
 	}))
 	t.Cleanup(restServer.Close)
 
-	exchange := NewBybit([]string{"BTCUSDT"}, WithBybitRESTURL(restServer.URL))
-	_, err := exchange.recoverSymbol(context.Background(), "BTCUSDT", "a")
+	ipThrottle := newRESTThrottle(0)
+	ipLimiter := newRequestWindowLimiter(bybitIPRequestLimit, bybitIPRequestWindow)
+	linear := NewBybitLinear([]string{"BTCUSDT"}, WithBybitRESTURL(restServer.URL))
+	inverse := NewBybitInverse([]string{"BTCUSD"}, WithBybitRESTURL(restServer.URL))
+	linear.recoveryIPThrottle = ipThrottle
+	inverse.recoveryIPThrottle = ipThrottle
+	linear.recoveryIPLimiter = ipLimiter
+	inverse.recoveryIPLimiter = ipLimiter
+
+	_, err := linear.recoverSymbol(context.Background(), "BTCUSDT", "a")
 	if err == nil || !strings.Contains(err.Error(), "HTTP recovery paused") {
 		t.Fatalf("first recovery error = %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = exchange.recoverSymbol(ctx, "BTCUSDT", "a")
-	if err == nil || !strings.Contains(err.Error(), "rate limit") {
-		t.Fatalf("second recovery error = %v", err)
+	_, err = inverse.recoverSymbol(ctx, "BTCUSD", "a")
+	if err == nil || !strings.Contains(err.Error(), "IP embargo") {
+		t.Fatalf("cross-adapter recovery error = %v", err)
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("HTTP requests = %d, want 1 during the IP-ban pause", got)
+	}
+	ipLimiter.mu.Lock()
+	used := ipLimiter.used
+	ipLimiter.mu.Unlock()
+	if used != 1 {
+		t.Fatalf("IP request budget used = %d, want 1", used)
 	}
 }
 

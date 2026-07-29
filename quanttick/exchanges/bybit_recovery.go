@@ -176,14 +176,18 @@ func (b *Bybit) recoverSymbol(
 	symbol string,
 	cursorUID string,
 ) ([]quanttick.TradeEvent, error) {
+	limit := bybitDerivativeRecoveryLimit
+	if b.category == "spot" {
+		limit = bybitSpotRecoveryLimit
+	}
 	endpoint, err := url.Parse(strings.TrimRight(b.RESTURL, "/") + "/v5/market/recent-trade")
 	if err != nil {
 		return nil, fmt.Errorf("build bybit recovery URL: %w", err)
 	}
 	query := endpoint.Query()
-	query.Set("category", "linear")
+	query.Set("category", b.category)
 	query.Set("symbol", symbol)
-	query.Set("limit", "1000")
+	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -195,8 +199,13 @@ func (b *Bybit) recoverSymbol(
 		if err := b.recoveryThrottle.wait(ctx); err != nil {
 			return nil, fmt.Errorf("wait for bybit recovery rate limit: %w", err)
 		}
-		if err := b.recoveryIPLimiter.wait(ctx, 1); err != nil {
+		reservation, err := b.recoveryIPLimiter.reserve(ctx, 1)
+		if err != nil {
 			return nil, fmt.Errorf("wait for bybit recovery IP limit: %w", err)
+		}
+		if err := b.recoveryIPThrottle.wait(ctx); err != nil {
+			reservation.refund(1)
+			return nil, fmt.Errorf("wait for bybit recovery IP embargo: %w", err)
 		}
 		response, err := b.HTTPClient.Do(request)
 		if err != nil {
@@ -216,6 +225,7 @@ func (b *Bybit) recoverSymbol(
 				delay = bybitIPBanDelay
 			}
 			b.recoveryThrottle.deferFor(delay)
+			b.recoveryIPThrottle.deferFor(delay)
 			return nil, fmt.Errorf(
 				"fetch bybit recovery for %s: HTTP 403; HTTP recovery paused for %s",
 				symbol,
@@ -259,7 +269,7 @@ func (b *Bybit) recoverSymbol(
 		if err != nil {
 			return nil, fmt.Errorf("parse bybit recovery time: %w", err)
 		}
-		trade, err := parseBybitTrade(bybitTrade{
+		trade, err := b.parseTrade(bybitTrade{
 			TradeTime: tradeTime,
 			Symbol:    rawTrade.Symbol,
 			Side:      rawTrade.Side,
