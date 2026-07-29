@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -332,15 +331,6 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	}
 	if !threshold.Equal(quanttick.MustDecimal("25000")) {
 		t.Fatalf("threshold = %s, want 25000", threshold)
-	}
-}
-
-func TestExchangesFromEnvRejectsAmbiguousBybitSymbols(t *testing.T) {
-	t.Setenv("BYBIT_SYMBOLS", "BTCUSDT")
-
-	_, _, err := exchangesFromEnv()
-	if err == nil || !strings.Contains(err.Error(), "BYBIT_SYMBOLS is no longer supported") {
-		t.Fatalf("error = %v", err)
 	}
 }
 

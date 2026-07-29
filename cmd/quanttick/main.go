@@ -272,11 +272,6 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 }
 
 func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, error) {
-	if legacy := strings.TrimSpace(os.Getenv("BYBIT_SYMBOLS")); legacy != "" {
-		return nil, nil, fmt.Errorf(
-			"BYBIT_SYMBOLS is no longer supported; use BYBIT_SPOT_SYMBOLS, BYBIT_LINEAR_SYMBOLS, or BYBIT_INVERSE_SYMBOLS",
-		)
-	}
 	clients := make([]quanttick.Exchange, 0, len(exchangeEnvConfigs))
 	thresholds := make(map[string]quanttick.Decimal)
 	for _, config := range exchangeEnvConfigs {
