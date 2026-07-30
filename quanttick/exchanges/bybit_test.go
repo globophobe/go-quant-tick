@@ -247,9 +247,10 @@ func TestBybitRunBuffersUntilAckAndSendsHeartbeat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	trades := make(chan quanttick.TradeEvent, 1)
+	errs := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- exchange.run(ctx, trades, newSeenTradeIDs(bybitSeenTradeLimit))
+		done <- exchange.run(ctx, trades, errs, newSeenTradeIDs(bybitSeenTradeLimit))
 	}()
 
 	select {
@@ -390,14 +391,14 @@ func TestBybitRecoversReconnectGapBeforeWebSocketReplay(t *testing.T) {
 	}
 }
 
-func TestBybitRejectsRecoveryWithoutRESTToWebSocketOverlap(t *testing.T) {
+func TestBybitContinuesWhenCursorIsOutsideRecoveryWindow(t *testing.T) {
 	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `{
 			"retCode":0,
 			"retMsg":"OK",
 			"result":{"list":[
-				{"execId":"b","symbol":"BTCUSDT","price":"101","size":"2","side":"Sell","time":"1784937600001"},
-				{"execId":"a","symbol":"BTCUSDT","price":"100","size":"1","side":"Buy","time":"1784937600000"}
+				{"execId":"c","symbol":"BTCUSDT","price":"102","size":"3","side":"Buy","time":"1784937600002"},
+				{"execId":"b","symbol":"BTCUSDT","price":"101","size":"2","side":"Sell","time":"1784937600001"}
 			]}
 		}`)
 	}))
@@ -409,7 +410,7 @@ func TestBybitRejectsRecoveryWithoutRESTToWebSocketOverlap(t *testing.T) {
 		}
 		for _, message := range []string{
 			`{"success":true,"ret_msg":"","conn_id":"test","req_id":"trades","op":"subscribe"}`,
-			`{"topic":"publicTrade.BTCUSDT","type":"snapshot","data":[{"T":1784937600003,"s":"BTCUSDT","S":"Sell","v":"4","p":"103","i":"d","seq":4}]}`,
+			`{"topic":"publicTrade.BTCUSDT","type":"snapshot","data":[{"T":1784937600002,"s":"BTCUSDT","S":"Buy","v":"3","p":"102","i":"c","seq":3},{"T":1784937600003,"s":"BTCUSDT","S":"Sell","v":"4","p":"103","i":"d","seq":4}]}`,
 		} {
 			if err := writeExchangeWebSocketMessage(ctx, conn, message); err != nil {
 				return err
@@ -428,23 +429,37 @@ func TestBybitRejectsRecoveryWithoutRESTToWebSocketOverlap(t *testing.T) {
 	)
 	exchange.lastUIDs["BTCUSDT"] = "a"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	trades := make(chan quanttick.TradeEvent, 4)
+	errs := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- exchange.run(ctx, trades, newSeenTradeIDs(bybitSeenTradeLimit))
+		done <- exchange.run(ctx, trades, errs, newSeenTradeIDs(bybitSeenTradeLimit))
 	}()
 
-	err := <-done
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Fatalf("run error = %v, want overlap failure", err)
-	}
 	select {
-	case trade := <-trades:
-		t.Fatalf("unproven handoff emitted trade %#v", trade)
-	default:
+	case err := <-errs:
+		if !strings.Contains(err.Error(), "does not contain cursor") {
+			t.Fatalf("recovery error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for recovery diagnostic")
 	}
+	var uids []string
+	for len(uids) < 3 {
+		select {
+		case trade := <-trades:
+			uids = append(uids, trade.UID)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for best-effort recovered trades")
+		}
+	}
+	if want := []string{"b", "c", "d"}; !reflect.DeepEqual(uids, want) {
+		t.Fatalf("trade uids = %#v, want %#v", uids, want)
+	}
+	cancel()
+	<-done
 }
 
 func TestBybitQuietSymbolDoesNotBlockActiveSymbolRecovery(t *testing.T) {
@@ -510,9 +525,10 @@ func TestBybitQuietSymbolDoesNotBlockActiveSymbolRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	trades := make(chan quanttick.TradeEvent, 4)
+	errs := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- exchange.run(ctx, trades, newSeenTradeIDs(bybitSeenTradeLimit))
+		done <- exchange.run(ctx, trades, errs, newSeenTradeIDs(bybitSeenTradeLimit))
 	}()
 
 	var uids []string
@@ -535,6 +551,64 @@ func TestBybitQuietSymbolDoesNotBlockActiveSymbolRecovery(t *testing.T) {
 	}
 	if got := quietRequests.Load(); got != 1 {
 		t.Fatalf("quiet requests = %d, want 1", got)
+	}
+}
+
+func TestBybitKeepsCurrentPassRecoveryWhenLaterSymbolFails(t *testing.T) {
+	var ethRequests atomic.Int32
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("symbol") {
+		case "BTCUSDT":
+			_, _ = fmt.Fprint(w, `{
+				"retCode":0,
+				"retMsg":"OK",
+				"result":{"list":[
+					{"execId":"c","symbol":"BTCUSDT","price":"102","size":"3","side":"Buy","time":"1784937600002"},
+					{"execId":"b","symbol":"BTCUSDT","price":"101","size":"2","side":"Sell","time":"1784937600001"},
+					{"execId":"a","symbol":"BTCUSDT","price":"100","size":"1","side":"Buy","time":"1784937600000"}
+				]}
+			}`)
+		case "ETHUSDT":
+			ethRequests.Add(1)
+			http.Error(w, "ETH recovery failed", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected symbol", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(restServer.Close)
+
+	exchange := NewBybitLinear(
+		[]string{"BTCUSDT", "ETHUSDT"},
+		WithBybitRESTURL(restServer.URL),
+	)
+	exchange.lastUIDs["BTCUSDT"] = "a"
+	exchange.lastUIDs["ETHUSDT"] = "e"
+	buffered := []quanttick.TradeEvent{
+		{Symbol: "BTCUSDT", UID: "c", Timestamp: time.UnixMilli(1784937600002)},
+		{Symbol: "ETHUSDT", UID: "x", Timestamp: time.UnixMilli(1784937600003)},
+	}
+	stream := make(chan quanttick.TradeEvent)
+	streamErr := make(chan error)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	recovered, gotBuffered, err := exchange.recoverWithWebSocketOverlap(
+		ctx,
+		buffered,
+		stream,
+		streamErr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "ETH recovery failed") {
+		t.Fatalf("recovery error = %v", err)
+	}
+	if got := tradeUIDs(recovered); !reflect.DeepEqual(got, []string{"b", "c"}) {
+		t.Fatalf("recovered UIDs = %#v, want [b c]", got)
+	}
+	if got := tradeUIDs(gotBuffered); !reflect.DeepEqual(got, []string{"c", "x"}) {
+		t.Fatalf("buffered UIDs = %#v, want [c x]", got)
+	}
+	if got := ethRequests.Load(); got != 1 {
+		t.Fatalf("ETH requests = %d, want 1", got)
 	}
 }
 

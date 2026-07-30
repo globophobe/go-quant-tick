@@ -152,7 +152,7 @@ func (b *Bybit) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-chan
 
 		for {
 			startedAt := time.Now()
-			if err := b.run(ctx, trades, seen); err != nil {
+			if err := b.run(ctx, trades, errs, seen); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -185,6 +185,7 @@ func (b *Bybit) SubscriptionMessages() []map[string]any {
 func (b *Bybit) run(
 	ctx context.Context,
 	trades chan<- quanttick.TradeEvent,
+	errs chan<- error,
 	seen *seenTradeIDs,
 ) error {
 	conn, err := dialWebSocket(ctx, b.name, b.URL)
@@ -230,8 +231,7 @@ func (b *Bybit) run(
 	)
 	cancelRecovery()
 	if recoveryErr != nil {
-		cancelStream()
-		return recoveryErr
+		sendError(ctx, errs, recoveryErr)
 	}
 	for _, trade := range recovered {
 		if err := emitSeenTrade(ctx, trades, seen, b.lastUIDs, trade); err != nil {

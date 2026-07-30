@@ -111,7 +111,7 @@ func TestDeribitRejectsUnexpectedChannelsAndSequenceGapsInRecovery(t *testing.T)
 	}
 }
 
-func TestDeribitRecoveryDiscardsPartialRowsOnError(t *testing.T) {
+func TestDeribitRecoveryKeepsPartialRowsOnError(t *testing.T) {
 	var requests atomic.Int32
 	rest := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if requests.Add(1) == 1 {
@@ -136,8 +136,8 @@ func TestDeribitRecoveryDiscardsPartialRowsOnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("partial recovery should fail")
 	}
-	if len(recovered) != 0 {
-		t.Fatalf("recovered %d partial trades, want none", len(recovered))
+	if len(recovered) != 2 {
+		t.Fatalf("recovered %d partial trades, want 2", len(recovered))
 	}
 
 	parsed, err := exchange.parseTradeMessage(
@@ -147,13 +147,18 @@ func TestDeribitRecoveryDiscardsPartialRowsOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trades := make(chan quanttick.TradeEvent, 1)
+	trades := make(chan quanttick.TradeEvent, 3)
+	for _, recoveredTrade := range recovered {
+		if err := exchange.emitParsedTrade(context.Background(), trades, recoveredTrade); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := exchange.emitParsedTrade(context.Background(), trades, parsed[0]); err != nil {
 		t.Fatal(err)
 	}
-	if trade := <-trades; trade.IsSequential {
-		t.Fatal("first buffered trade after failed recovery should be non-sequential")
-	}
+	got := []quanttick.TradeEvent{<-trades, <-trades, <-trades}
+	assertStrings(t, tradeUIDs(got), []string{"101", "102", "103"})
+	assertBools(t, tradeSequential(got), []bool{true, true, true})
 }
 
 func TestDeribitTradesRecoversGapBeforeBufferedWebSocketTrades(t *testing.T) {
