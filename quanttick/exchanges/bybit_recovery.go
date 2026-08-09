@@ -2,9 +2,11 @@ package exchanges
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +33,46 @@ func (b *Bybit) recoverWithWebSocketOverlap(
 	}
 	verified := make(map[string][]quanttick.TradeEvent)
 	quietCandidates := make(map[string][]quanttick.TradeEvent)
+	var recoveryErrors []error
+	recoveredTrades := func() []quanttick.TradeEvent {
+		recovered := make([]quanttick.TradeEvent, 0)
+		for _, symbol := range b.Symbols {
+			recovered = append(recovered, verified[symbol]...)
+		}
+		sortTradeEventsChronologically(recovered)
+		return recovered
+	}
+	verifyPass := func(pass map[string][]quanttick.TradeEvent) {
+		for symbol, rows := range pass {
+			if handoff.overlaps(symbol, rows) {
+				verified[symbol] = rows
+				delete(pending, symbol)
+				delete(quietCandidates, symbol)
+				continue
+			}
+			if !handoff.hasTrades(symbol) {
+				quietCandidates[symbol] = rows
+			}
+		}
+	}
+	drainAvailable := func() error {
+		for {
+			select {
+			case trade, ok := <-stream:
+				if !ok {
+					readErr := <-streamErr
+					return fmt.Errorf(
+						"bybit websocket closed before REST handoff overlap: %w",
+						readErr,
+					)
+				}
+				handoff.add(trade)
+			default:
+				return nil
+			}
+		}
+	}
+
 	for len(pending) > 0 {
 		for symbol, rows := range quietCandidates {
 			if _, ok := pending[symbol]; !ok {
@@ -47,43 +89,32 @@ func (b *Bybit) recoverWithWebSocketOverlap(
 		}
 
 		pass := make(map[string][]quanttick.TradeEvent, len(pending))
+		terminalError := false
 		for _, symbol := range b.Symbols {
 			if _, ok := pending[symbol]; !ok {
 				continue
 			}
 			rows, err := b.recoverSymbol(ctx, symbol, b.lastUIDs[symbol])
 			if err != nil {
-				return nil, nil, err
+				var cursorGap *bybitCursorGapError
+				if !errors.As(err, &cursorGap) {
+					recoveryErrors = append(recoveryErrors, err)
+					terminalError = true
+					break
+				}
+				recoveryErrors = append(recoveryErrors, err)
 			}
 			pass[symbol] = rows
 		}
 
-		for {
-			select {
-			case trade, ok := <-stream:
-				if !ok {
-					readErr := <-streamErr
-					return nil, nil, fmt.Errorf(
-						"bybit websocket closed before REST handoff overlap: %w",
-						readErr,
-					)
-				}
-				handoff.add(trade)
-			default:
-				goto streamDrained
-			}
+		if err := drainAvailable(); err != nil {
+			recoveryErrors = append(recoveryErrors, err)
+			terminalError = true
 		}
 
-	streamDrained:
-		for symbol, rows := range pass {
-			if handoff.overlaps(symbol, rows) {
-				verified[symbol] = rows
-				delete(pending, symbol)
-				continue
-			}
-			if !handoff.hasTrades(symbol) {
-				quietCandidates[symbol] = rows
-			}
+		verifyPass(pass)
+		if terminalError {
+			return recoveredTrades(), handoff.trades, errors.Join(recoveryErrors...)
 		}
 		if len(pending) == 0 {
 			break
@@ -95,32 +126,55 @@ func (b *Bybit) recoverWithWebSocketOverlap(
 				if !ok {
 					stopTimer(retry)
 					readErr := <-streamErr
-					return nil, nil, fmt.Errorf(
+					recoveryErrors = append(recoveryErrors, fmt.Errorf(
 						"bybit websocket closed before REST handoff overlap: %w",
 						readErr,
-					)
+					))
+					verifyPass(pass)
+					return recoveredTrades(), handoff.trades, errors.Join(recoveryErrors...)
 				}
 				handoff.add(trade)
 			case <-retry.C:
+				if err := drainAvailable(); err != nil {
+					recoveryErrors = append(recoveryErrors, err)
+					verifyPass(pass)
+					return recoveredTrades(), handoff.trades, errors.Join(recoveryErrors...)
+				}
+				verifyPass(pass)
 				goto retryRecovery
 			case <-ctx.Done():
 				stopTimer(retry)
-				return nil, nil, fmt.Errorf(
+				recoveryErrors = append(recoveryErrors, fmt.Errorf(
 					"bybit REST-to-websocket handoff did not overlap: %w",
 					ctx.Err(),
-				)
+				))
+				if err := drainAvailable(); err != nil {
+					recoveryErrors = append(recoveryErrors, err)
+				}
+				verifyPass(pass)
+				return recoveredTrades(), handoff.trades, errors.Join(recoveryErrors...)
 			}
 		}
 
 	retryRecovery:
 	}
 
-	recovered := make([]quanttick.TradeEvent, 0)
-	for _, symbol := range b.Symbols {
-		recovered = append(recovered, verified[symbol]...)
-	}
-	sortTradeEventsChronologically(recovered)
-	return recovered, handoff.trades, nil
+	return recoveredTrades(), handoff.trades, errors.Join(recoveryErrors...)
+}
+
+type bybitCursorGapError struct {
+	symbol    string
+	cursorUID string
+	rows      int
+}
+
+func (e *bybitCursorGapError) Error() string {
+	return fmt.Sprintf(
+		"bybit recovery for %s does not contain cursor %s in %d recent trades",
+		e.symbol,
+		e.cursorUID,
+		e.rows,
+	)
 }
 
 type bybitRecoveryHandoff struct {
@@ -283,15 +337,16 @@ func (b *Bybit) recoverSymbol(
 		newestFirst = append(newestFirst, trade)
 	}
 	recovered, found := tradesAfterCursorNewestFirst(newestFirst, cursorUID)
-	if !found {
-		return nil, fmt.Errorf(
-			"bybit recovery for %s does not contain cursor %s in %d recent trades",
-			symbol,
-			cursorUID,
-			len(newestFirst),
-		)
+	if found {
+		return recovered, nil
 	}
-	return recovered, nil
+	recovered = append([]quanttick.TradeEvent(nil), newestFirst...)
+	slices.Reverse(recovered)
+	return recovered, &bybitCursorGapError{
+		symbol:    symbol,
+		cursorUID: cursorUID,
+		rows:      len(newestFirst),
+	}
 }
 
 func bybitResponseDelay(headers http.Header, now time.Time) (time.Duration, error) {

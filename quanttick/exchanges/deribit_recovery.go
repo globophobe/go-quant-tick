@@ -24,13 +24,10 @@ func (d *Deribit) recoverTrades(ctx context.Context) ([]deribitParsedTrade, erro
 			continue
 		}
 		rows, err := d.recoverSymbol(ctx, symbol, cursor+1)
-		recovered = append(recovered, rows...)
 		if err != nil {
 			recoveryErrors = append(recoveryErrors, err)
 		}
-	}
-	if len(recoveryErrors) > 0 {
-		return nil, errors.Join(recoveryErrors...)
+		recovered = append(recovered, rows...)
 	}
 	sort.SliceStable(recovered, func(left, right int) bool {
 		if !recovered[left].event.Timestamp.Equal(recovered[right].event.Timestamp) {
@@ -41,7 +38,7 @@ func (d *Deribit) recoverTrades(ctx context.Context) ([]deribitParsedTrade, erro
 		}
 		return recovered[left].sequence < recovered[right].sequence
 	})
-	return recovered, nil
+	return recovered, errors.Join(recoveryErrors...)
 }
 
 func (d *Deribit) recoverSymbol(

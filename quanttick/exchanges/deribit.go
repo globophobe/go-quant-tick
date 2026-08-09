@@ -171,7 +171,6 @@ func (d *Deribit) run(
 	cancelRecovery()
 	if recoveryErr != nil {
 		sendError(ctx, errs, recoveryErr)
-		recovered = nil
 	}
 	for _, parsed := range recovered {
 		if err := d.emitParsedTrade(ctx, trades, parsed); err != nil {
