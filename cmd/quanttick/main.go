@@ -161,7 +161,10 @@ func isTransientExchangeError(err error) bool {
 			return transient
 		}
 	}
-	if errors.Is(err, syscall.ETIMEDOUT) {
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
 	var netErr net.Error

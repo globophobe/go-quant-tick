@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"syscall"
@@ -114,6 +115,26 @@ func TestIsTransientExchangeErrorUsesTypedAndNetworkErrors(t *testing.T) {
 					Err: &os.SyscallError{Syscall: "read", Err: syscall.ETIMEDOUT},
 				},
 			),
+			want: true,
+		},
+		{
+			name: "websocket unexpected EOF",
+			err: fmt.Errorf(
+				"read binance websocket: failed to read frame payload: %w",
+				io.ErrUnexpectedEOF,
+			),
+			want: true,
+		},
+		{
+			name: "unclassified dial connection reset",
+			err: testTransientExchangeError{
+				message: "dial bybit-inverse websocket",
+				err: &net.OpError{
+					Op:  "read",
+					Net: "tcp",
+					Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+				},
+			},
 			want: true,
 		},
 		{
