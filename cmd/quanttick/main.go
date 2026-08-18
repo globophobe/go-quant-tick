@@ -263,11 +263,6 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitfinex(symbols) },
 	},
 	{
-		envName:     "BITMEX_SYMBOLS",
-		exchange:    exchanges.BitmexName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitmex(symbols) },
-	},
-	{
 		envName:     "HYPERLIQUID_SYMBOLS",
 		exchange:    exchanges.HyperliquidName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewHyperliquid(symbols) },

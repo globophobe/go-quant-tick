@@ -108,9 +108,9 @@ func TestBucketFlushWorkerTimesOutAndRetriesNewestWatermark(t *testing.T) {
 
 	start := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
 	newer := start.Add(time.Minute)
-	worker.Request("bitmex", "XBTUSD", start)
+	worker.Request("hyperliquid", "BTC", start)
 	receiveBucketFlush(t, calls)
-	worker.Request("bitmex", "XBTUSD", newer)
+	worker.Request("hyperliquid", "BTC", newer)
 
 	select {
 	case err := <-reported:
