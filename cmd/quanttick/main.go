@@ -161,7 +161,10 @@ func isTransientExchangeError(err error) bool {
 			return transient
 		}
 	}
-	if errors.Is(err, syscall.ETIMEDOUT) {
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
 	var netErr net.Error
@@ -258,11 +261,6 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		envName:     "BITFINEX_SYMBOLS",
 		exchange:    exchanges.BitfinexName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitfinex(symbols) },
-	},
-	{
-		envName:     "BITMEX_SYMBOLS",
-		exchange:    exchanges.BitmexName,
-		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBitmex(symbols) },
 	},
 	{
 		envName:     "HYPERLIQUID_SYMBOLS",

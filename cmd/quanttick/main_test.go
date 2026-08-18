@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"syscall"
@@ -117,6 +118,26 @@ func TestIsTransientExchangeErrorUsesTypedAndNetworkErrors(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "websocket unexpected EOF",
+			err: fmt.Errorf(
+				"read binance websocket: failed to read frame payload: %w",
+				io.ErrUnexpectedEOF,
+			),
+			want: true,
+		},
+		{
+			name: "unclassified dial connection reset",
+			err: testTransientExchangeError{
+				message: "dial bybit-inverse websocket",
+				err: &net.OpError{
+					Op:  "read",
+					Net: "tcp",
+					Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "typed permanent error",
 			err: testTransientExchangeError{
 				message:   "forbidden",
@@ -152,13 +173,13 @@ func TestUpdateFlushWatermarkKeepsPerSymbolHighWater(t *testing.T) {
 	latest := start.Add(6 * time.Minute)
 	late := start.Add(46 * time.Second)
 
-	if got := updateFlushWatermark(watermarks, testCommandTrade("1", "bitmex", "XBTUSD", start)); !got.Equal(start) {
+	if got := updateFlushWatermark(watermarks, testCommandTrade("1", "hyperliquid", "BTC", start)); !got.Equal(start) {
 		t.Fatalf("first watermark = %s, want %s", got, start)
 	}
-	if got := updateFlushWatermark(watermarks, testCommandTrade("2", "bitmex", "XBTUSD", latest)); !got.Equal(latest) {
+	if got := updateFlushWatermark(watermarks, testCommandTrade("2", "hyperliquid", "BTC", latest)); !got.Equal(latest) {
 		t.Fatalf("advanced watermark = %s, want %s", got, latest)
 	}
-	if got := updateFlushWatermark(watermarks, testCommandTrade("3", "bitmex", "XBTUSD", late)); !got.Equal(latest) {
+	if got := updateFlushWatermark(watermarks, testCommandTrade("3", "hyperliquid", "BTC", late)); !got.Equal(latest) {
 		t.Fatalf("late watermark = %s, want %s", got, latest)
 	}
 
@@ -282,7 +303,6 @@ func TestExchangesFromEnvBuildsClientsAndThresholds(t *testing.T) {
 }
 
 func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
-	t.Setenv("BITMEX_SYMBOLS", "XBTUSD,XBT_USDT=25000")
 	t.Setenv("BYBIT_SPOT_SYMBOLS", "BTCUSDT=10000")
 	t.Setenv("BYBIT_LINEAR_SYMBOLS", "BTCUSDT=30000")
 	t.Setenv("BYBIT_INVERSE_SYMBOLS", "BTCUSD=20000")
@@ -292,19 +312,12 @@ func TestExchangesFromEnvAppliesConfiguredMarketThresholds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClients := 5
+	wantClients := 4
 	if len(clients) != wantClients {
 		t.Fatalf("clients = %d, want %d", len(clients), wantClients)
 	}
 
-	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BitmexName, "XBT_USDT")]
-	if !ok {
-		t.Fatal("expected XBT_USDT threshold")
-	}
-	if !threshold.Equal(quanttick.MustDecimal("25000")) {
-		t.Fatalf("threshold = %s, want 25000", threshold)
-	}
-	threshold, ok = thresholds[quanttick.ExchangeSymbolKey(exchanges.BybitSpotName, "BTCUSDT")]
+	threshold, ok := thresholds[quanttick.ExchangeSymbolKey(exchanges.BybitSpotName, "BTCUSDT")]
 	if !ok {
 		t.Fatal("expected Bybit spot BTCUSDT threshold")
 	}

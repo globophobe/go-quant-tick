@@ -161,22 +161,6 @@ func TestWebSocketDataBufferOrdersAndDeduplicatesTradesInMemory(t *testing.T) {
 	}
 }
 
-func TestWebSocketDataTradesPreserveBitmexFeedOrderForEqualTimestamps(t *testing.T) {
-	timestamp := time.Now().UTC().Truncate(time.Microsecond)
-	incoming := []TradeEvent{
-		testTrade("z-opaque", timestamp, withExchange("bitmex"), withSymbol("XBTUSD")),
-		testTrade("a-opaque", timestamp, withExchange("bitmex"), withSymbol("XBTUSD")),
-	}
-	var trades []TradeEvent
-	var seen map[string]struct{}
-	for _, trade := range incoming {
-		trades, seen = insertWebSocketDataTrade("bitmex", RawTrades, trades, seen, trade)
-	}
-	assertTradeUIDs(t, trades, []string{"z-opaque", "a-opaque"})
-	canonical := canonicalWebSocketDataTrades("bitmex", RawTrades, incoming)
-	assertTradeUIDs(t, canonical, []string{"z-opaque", "a-opaque"})
-}
-
 func TestWebSocketDataTradesPreserveBybitFeedOrderForEqualTimestamps(t *testing.T) {
 	for _, exchange := range []string{"bybit", "bybit-linear", "bybit-inverse"} {
 		t.Run(exchange, func(t *testing.T) {

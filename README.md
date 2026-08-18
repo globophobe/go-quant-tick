@@ -82,7 +82,6 @@ BYBIT_SPOT_SYMBOLS=BTCUSDT
 BYBIT_LINEAR_SYMBOLS=BTCUSDT
 BYBIT_INVERSE_SYMBOLS=BTCUSD
 BITFINEX_SYMBOLS=tBTCF0:USTF0
-BITMEX_SYMBOLS=XBTUSD
 COINBASE_SYMBOLS=BTC-USD
 DERIBIT_SYMBOLS=BTC-PERPETUAL
 HYPERLIQUID_SYMBOLS=BTC
@@ -111,7 +110,6 @@ go run ./examples/bybit
 go run ./examples/coinbase
 go run ./examples/deribit
 go run ./examples/bitfinex
-go run ./examples/bitmex
 go run ./examples/hyperliquid
 ```
 
@@ -129,8 +127,6 @@ Supported exchanges
 ✅ Binance Futures
 
 ✅ Bitfinex
-
-✅ BitMEX
 
 ✅ Bybit
 
