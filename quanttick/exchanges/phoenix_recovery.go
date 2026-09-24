@@ -14,9 +14,10 @@ import (
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
 
-// Recovery starts at the last emitted second, including its other fills. The
-// cursor-paginated REST window is read in full before emitting it oldest first;
-// reversing individual pages would reorder same-second fills at page boundaries.
+// Recovery reads the last emitted second to locate the anchor, then emits only
+// its suffix. Appending previously unseen predecessors from that second would
+// corrupt closing prices. Read all REST pages before reversing the window so
+// same-second fills retain their order across page boundaries.
 // The fill feed supplies no sequence with which to prove continuity, so events
 // retain IsSequential=false even after a successful REST overlap.
 func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quanttick.TradeEvent, error) {
@@ -110,19 +111,21 @@ func (p *Phoenix) recoverSymbol(ctx context.Context, symbol string, anchor quant
 	slices.Reverse(fills)
 	counter := phoenixFillCounter{}
 	trades := make([]quanttick.TradeEvent, 0, len(fills))
-	foundAnchor := false
+	anchorIndex := -1
 	receivedAt := time.Now().UTC()
-	for _, fill := range fills {
+	for index, fill := range fills {
 		trade, err := parsePhoenixFill(fill, receivedAt)
 		if err != nil {
 			return nil, err
 		}
 		trade.UID = counter.identify(trade, fill)
-		foundAnchor = foundAnchor || trade.UID == anchor.UID
+		if trade.UID == anchor.UID {
+			anchorIndex = index
+		}
 		trades = append(trades, trade)
 	}
-	if !foundAnchor {
+	if anchorIndex < 0 {
 		return nil, fmt.Errorf("phoenix REST fills did not include the previous WebSocket fill")
 	}
-	return trades, nil
+	return trades[anchorIndex+1:], nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -234,6 +235,96 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 		if got[i].Timestamp.Second() != second {
 			t.Fatalf("fill order: %v", got)
 		}
+	}
+}
+
+func TestPhoenixReconnectFromWithinASecondPreservesClosingPrice(t *testing.T) {
+	data, err := os.ReadFile("testdata/phoenix_recovery.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var history struct {
+		Data []phoenixFill `json:"data"`
+	}
+	if err := json.Unmarshal(data, &history); err != nil {
+		t.Fatal(err)
+	}
+	slices.Reverse(history.Data)
+	for _, test := range []struct {
+		name     string
+		start    int
+		notional string
+		volume   string
+	}{
+		{"first fill", 0, "0.4546", "38372.7962"},
+		{"middle fill", 1, "0.3652", "30826.918"},
+		{"last fill", 2, "0.0052", "438.958"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(data)
+			}))
+			defer rest.Close()
+			var connections atomic.Int32
+			later := phoenixTestFill("later-tx", "2026-09-24T02:48:03Z")
+			wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
+					return err
+				}
+				fill := later
+				if connections.Add(1) == 1 {
+					fill = history.Data[test.start]
+				}
+				if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", fill)); err != nil {
+					return err
+				}
+				return conn.Close(websocket.StatusNormalClosure, "reconnect")
+			})
+			p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL))
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			trades := make(chan quanttick.TradeEvent, len(history.Data)+2)
+			errs := make(chan error, 2)
+			for range 2 {
+				if err := p.run(ctx, trades, errs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(trades)
+			close(errs)
+			for err := range errs {
+				t.Fatal(err)
+			}
+			aggregator := quanttick.NewTradeAggregator()
+			var completed, emitted []quanttick.TradeEvent
+			for trade := range trades {
+				emitted = append(emitted, trade)
+				rows, err := aggregator.Add(trade)
+				if err != nil {
+					t.Fatal(err)
+				}
+				completed = append(completed, rows...)
+			}
+			if len(completed) != 1 {
+				t.Fatalf("completed aggregates = %d, want 1", len(completed))
+			}
+			wantClose := quanttick.MustDecimal("84415.00000000001")
+			if !completed[0].Price.Equal(wantClose) {
+				t.Errorf("aggregate close = %s, want %s; emitted prices = %v", completed[0].Price, wantClose, tradePrices(emitted))
+			}
+			assertDecimals(t, tradeNotionals(completed), []string{test.notional})
+			assertDecimals(t, tradeVolumes(completed), []string{test.volume})
+			var wantPrices []string
+			for _, fill := range history.Data[test.start:] {
+				wantPrices = append(wantPrices, fill.Price)
+			}
+			wantPrices = append(wantPrices, later.Price)
+			assertDecimals(t, tradePrices(emitted), wantPrices)
+		})
 	}
 }
 

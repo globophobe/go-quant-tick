@@ -141,9 +141,9 @@ Supported exchanges
 ✅ Phoenix perpetuals
 
 Phoenix uses the public `fills` WebSocket channel and publishes under exchange
-`phoenix` with market symbols such as `BTC`, `ETH`, and `SOL`. Reconnects recover
-fills from the cursor-paginated REST API, with a 15-second recovery budget and
-a 10,000-fill limit per market. Recovery failures go through the existing error
+`phoenix` with market symbols such as `BTC`, `ETH`, and `SOL`. Reconnects resume
+after the last emitted fill using REST history, with a 15-second recovery budget
+and a 10,000-fill limit per market. Recovery failures go through the existing error
 reporter. Historical backfills, candles, funding, and open interest are collected
 by DQT.
 
