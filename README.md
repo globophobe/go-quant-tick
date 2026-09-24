@@ -85,6 +85,7 @@ BITFINEX_SYMBOLS=tBTCF0:USTF0
 COINBASE_SYMBOLS=BTC-USD
 DERIBIT_SYMBOLS=BTC-PERPETUAL
 HYPERLIQUID_SYMBOLS=BTC
+PHOENIX_SYMBOLS=BTC
 WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 ```
@@ -111,6 +112,7 @@ go run ./examples/coinbase
 go run ./examples/deribit
 go run ./examples/bitfinex
 go run ./examples/hyperliquid
+go run ./examples/phoenix
 ```
 
 Example with a `BTCUSDT` threshold of `10000`:
@@ -135,6 +137,15 @@ Supported exchanges
 ✅ Deribit
 
 ✅ Hyperliquid
+
+✅ Phoenix perpetuals
+
+Phoenix uses the public `fills` WebSocket channel and publishes under exchange
+`phoenix` with market symbols such as `BTC`, `ETH`, and `SOL`. Reconnects recover
+fills from the cursor-paginated REST API, with a 15-second recovery budget and
+a 10,000-fill limit per market. Recovery failures go through the existing error
+reporter. Historical backfills, candles, funding, and open interest are collected
+by DQT.
 
 Tests
 -----
