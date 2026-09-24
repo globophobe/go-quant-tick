@@ -32,7 +32,6 @@ type Phoenix struct {
 	SubscriptionTimeout time.Duration
 
 	lastTrades       map[string]quanttick.TradeEvent
-	seen             *seenTradeIDs
 	recoveryThrottle *restThrottle
 }
 
@@ -47,7 +46,6 @@ func NewPhoenix(symbols []string, options ...PhoenixOption) *Phoenix {
 		ReconnectDelay:      time.Second,
 		SubscriptionTimeout: websocketSubscriptionTimeout,
 		lastTrades:          make(map[string]quanttick.TradeEvent),
-		seen:                newSeenTradeIDs(phoenixTradeLimit),
 		recoveryThrottle:    newRESTThrottle(phoenixRecoveryRequestInterval),
 	}
 	for _, option := range options {
@@ -137,7 +135,21 @@ func (p *Phoenix) run(ctx context.Context, trades chan<- quanttick.TradeEvent, e
 	defer cancelStream()
 	stream, streamErr := p.startTradeReader(streamCtx, conn, backlog, counter)
 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, reconnectRecoveryTimeout)
-	recovered, recoveryErr := p.recoverTrades(recoveryCtx, time.Now().UTC())
+	until := time.Now().UTC().Truncate(time.Second)
+	for _, anchor := range p.lastTrades {
+		if end := anchor.Timestamp.Truncate(time.Second).Add(time.Second); end.After(until) {
+			until = end
+		}
+	}
+	var recovered []quanttick.TradeEvent
+	// REST owns completed seconds. Wait for the anchor's second to close while
+	// the reader buffers live fills, so both sources have a disjoint handoff.
+	recoveryErr := sleepContext(recoveryCtx, time.Until(until))
+	if recoveryErr == nil {
+		recovered, recoveryErr = p.recoverTrades(recoveryCtx, until)
+	} else {
+		recoveryErr = fmt.Errorf("phoenix recovery gap while waiting for completed anchor second: %w", recoveryErr)
+	}
 	cancelRecovery()
 	if recoveryErr != nil {
 		sendError(ctx, errs, recoveryErr)
@@ -147,15 +159,28 @@ func (p *Phoenix) run(ctx context.Context, trades chan<- quanttick.TradeEvent, e
 			return err
 		}
 	}
+	resumeAt := make(map[string]time.Time, len(p.lastTrades))
+	for symbol, anchor := range p.lastTrades {
+		resumeAt[symbol] = anchor.Timestamp.Truncate(time.Second).Add(time.Second)
+	}
+	emitLive := func(trade quanttick.TradeEvent) error {
+		// Session-local occurrence numbers cannot deduplicate REST/WS overlap.
+		// A failed recovery also leaves the last emitted second ambiguous; its
+		// possible continuation is part of the reported gap.
+		if trade.Timestamp.Before(resumeAt[trade.Symbol]) {
+			return nil
+		}
+		return p.emitTrade(ctx, trades, trade)
+	}
 	for _, trade := range buffered {
-		err := p.emitTrade(ctx, trades, trade)
+		err := emitLive(trade)
 		backlog.release()
 		if err != nil {
 			return err
 		}
 	}
 	for trade := range stream {
-		err := p.emitTrade(ctx, trades, trade)
+		err := emitLive(trade)
 		backlog.release()
 		if err != nil {
 			return err
@@ -237,9 +262,6 @@ func (p *Phoenix) startTradeReader(ctx context.Context, conn *websocket.Conn, ba
 }
 
 func (p *Phoenix) emitTrade(ctx context.Context, trades chan<- quanttick.TradeEvent, trade quanttick.TradeEvent) error {
-	if !p.seen.Add(trade.Symbol, trade.UID) {
-		return nil
-	}
 	if err := sendTrade(ctx, trades, trade); err != nil {
 		return err
 	}

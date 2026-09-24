@@ -17,7 +17,9 @@ import (
 // Recovery reads the last emitted second to locate the anchor, then emits only
 // its suffix. Appending previously unseen predecessors from that second would
 // corrupt closing prices. Read all REST pages before reversing the window so
-// same-second fills retain their order across page boundaries.
+// same-second fills retain their order across page boundaries. Repeated anchor
+// fingerprints are ambiguous: source-local occurrence numbers cannot prove which
+// occurrence the previous session observed. Report a gap instead of replaying it.
 // The fill feed supplies no sequence with which to prove continuity, so events
 // retain IsSequential=false even after a successful REST overlap.
 func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quanttick.TradeEvent, error) {
@@ -46,6 +48,10 @@ func (p *Phoenix) recoverSymbol(ctx context.Context, symbol string, anchor quant
 	}
 	query := endpoint.Query()
 	since := anchor.Timestamp.Truncate(time.Second)
+	until = until.Truncate(time.Second)
+	if !since.Before(until) {
+		return nil, fmt.Errorf("phoenix recovery requires a completed anchor second")
+	}
 	query.Set("startTime", strconv.FormatInt(since.UnixMilli(), 10))
 	query.Set("endTime", strconv.FormatInt(until.UnixMilli(), 10))
 	query.Set("limit", strconv.Itoa(phoenixRecoveryPageLimit))
@@ -112,6 +118,7 @@ func (p *Phoenix) recoverSymbol(ctx context.Context, symbol string, anchor quant
 	counter := phoenixFillCounter{}
 	trades := make([]quanttick.TradeEvent, 0, len(fills))
 	anchorIndex := -1
+	anchorKey, _, _ := strings.Cut(anchor.UID, ":")
 	receivedAt := time.Now().UTC()
 	for index, fill := range fills {
 		trade, err := parsePhoenixFill(fill, receivedAt)
@@ -119,12 +126,16 @@ func (p *Phoenix) recoverSymbol(ctx context.Context, symbol string, anchor quant
 			return nil, err
 		}
 		trade.UID = counter.identify(trade, fill)
-		if trade.UID == anchor.UID {
+		key, _, _ := strings.Cut(trade.UID, ":")
+		if key == anchorKey {
+			if anchorIndex >= 0 {
+				return nil, fmt.Errorf("phoenix REST anchor is ambiguous: identical fills have source-local occurrence numbers")
+			}
 			anchorIndex = index
 		}
 		trades = append(trades, trade)
 	}
-	if anchorIndex < 0 {
+	if anchorIndex < 0 || trades[anchorIndex].UID != anchor.UID {
 		return nil, fmt.Errorf("phoenix REST fills did not include the previous WebSocket fill")
 	}
 	return trades[anchorIndex+1:], nil

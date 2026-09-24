@@ -39,8 +39,9 @@ type phoenixEnvelope struct {
 // Phoenix publishes individual fills without a fill ID. An occurrence number
 // preserves identical fills within one transaction, including across frames or
 // REST pages. Each WebSocket session and complete REST window counts separately;
-// matching IDs then remove their overlap. Numeric fields are canonicalized so
-// REST/WS formatting differences do not create new trades.
+// their occurrence numbers are not interchangeable. Recovery requires a unique
+// anchor fingerprint and hands off to WebSocket at a completed-second boundary.
+// Numeric fields are canonicalized so REST/WS formatting preserves fingerprints.
 type phoenixFillCounter struct {
 	counts map[string]int
 	order  []string

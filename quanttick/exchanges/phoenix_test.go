@@ -139,7 +139,9 @@ func TestPhoenixSubscriptionsAndControlMessages(t *testing.T) {
 }
 
 func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
-	first := phoenixTestFill("same-tx", "2026-09-24T00:00:01Z")
+	first := phoenixTestFill("anchor-tx", "2026-09-24T00:00:01Z")
+	first.BaseQty, first.QuoteQty = "-0.01", "844"
+	repeated := phoenixTestFill("repeated-tx", "2026-09-24T00:00:01Z")
 	second := phoenixTestFill("next-tx", "2026-09-24T00:00:02Z")
 	third := phoenixTestFill("later-tx", "2026-09-24T00:00:03Z")
 	recoveryStarted := make(chan struct{})
@@ -157,13 +159,13 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 			case <-r.Context().Done():
 				return
 			}
-			// An identical second fill crosses the page boundary.
-			json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{second, first}, "hasMore": true, "nextCursor": "older"})
+			// Identical fills straddle both the page boundary and the anchor.
+			json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{second, repeated, repeated}, "hasMore": true, "nextCursor": "older"})
 		} else {
 			if r.URL.Query().Get("cursor") != "older" {
 				t.Errorf("unexpected cursor: %s", r.URL)
 			}
-			json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{first}, "hasMore": false})
+			json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{first, repeated}, "hasMore": false})
 		}
 	}))
 	defer rest.Close()
@@ -186,7 +188,7 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", second, third)); err != nil {
+		if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", repeated, second, third, third)); err != nil {
 			return err
 		}
 		// The reader must stay active while REST waits, including control frames.
@@ -208,7 +210,7 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 	defer cancel()
 	trades, errs := p.Trades(ctx)
 	var got []quanttick.TradeEvent
-	for len(got) < 4 {
+	for len(got) < 6 {
 		select {
 		case trade, ok := <-trades:
 			if !ok {
@@ -228,10 +230,13 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 	if requests.Load() != 2 {
 		t.Fatalf("REST requests = %d", requests.Load())
 	}
-	if got[0].UID == got[1].UID || !strings.HasSuffix(got[1].UID, ":2") {
+	if !strings.HasSuffix(got[1].UID, ":2") || !strings.HasSuffix(got[2].UID, ":3") {
 		t.Fatalf("lost repeated fill: %v", tradeUIDs(got))
 	}
-	for i, second := range []int{1, 1, 2, 3} {
+	if got[4].UID == got[5].UID {
+		t.Fatal("collapsed identical live fills after recovery")
+	}
+	for i, second := range []int{1, 1, 1, 2, 3, 3} {
 		if got[i].Timestamp.Second() != second {
 			t.Fatalf("fill order: %v", got)
 		}
@@ -325,6 +330,150 @@ func TestPhoenixReconnectFromWithinASecondPreservesClosingPrice(t *testing.T) {
 			wantPrices = append(wantPrices, later.Price)
 			assertDecimals(t, tradePrices(emitted), wantPrices)
 		})
+	}
+}
+
+func TestPhoenixReconnectReportsAmbiguousRepeatedFill(t *testing.T) {
+	buy := phoenixTestFill("repeated-tx", "2026-09-24T00:00:01Z")
+	sell := buy
+	sell.BaseQty, sell.QuoteQty = "-0.01", "844"
+	later := phoenixTestFill("later-tx", "2026-09-24T00:00:02Z")
+	for _, test := range []struct {
+		name string
+		live []phoenixFill
+	}{
+		{"first occurrence", []phoenixFill{buy}},
+		{"last occurrence after sell", []phoenixFill{sell, buy}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{buy, sell, buy}, "hasMore": false})
+			}))
+			defer rest.Close()
+			var connections atomic.Int32
+			wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
+					return err
+				}
+				fills := []phoenixFill{buy, buy, later}
+				if connections.Add(1) == 1 {
+					fills = test.live
+				}
+				if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", fills...)); err != nil {
+					return err
+				}
+				return conn.Close(websocket.StatusNormalClosure, "reconnect")
+			})
+			p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL))
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			trades := make(chan quanttick.TradeEvent, 8)
+			errs := make(chan error, 2)
+			for range 2 {
+				if err := p.run(ctx, trades, errs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(trades)
+			close(errs)
+			var gaps []error
+			for err := range errs {
+				gaps = append(gaps, err)
+			}
+			if len(gaps) != 1 || !strings.Contains(gaps[0].Error(), "recovery gap for BTC") || !strings.Contains(gaps[0].Error(), "ambiguous") {
+				t.Errorf("recovery errors = %v, want one ambiguous gap", gaps)
+			}
+			aggregator := quanttick.NewTradeAggregator()
+			significant := quanttick.NewSignificantTradeAggregator(quanttick.MustDecimal("1000"), time.Minute)
+			var emitted []quanttick.TradeEvent
+			for trade := range trades {
+				emitted = append(emitted, trade)
+				rows, err := aggregator.Add(trade)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					if !row.Volume.Equal(quanttick.MustDecimal("844")) {
+						t.Errorf("aggregate volume = %s, want 844", row.Volume)
+					}
+					signals, err := significant.Add(row)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, signal := range signals {
+						if signal.Volume != nil {
+							t.Errorf("false significant trade: %+v", signal)
+						}
+					}
+				}
+			}
+			if len(emitted) != len(test.live)+1 || emitted[len(emitted)-1].Timestamp.Second() != 2 {
+				t.Fatalf("unexpected fills after reconnect: %+v", emitted)
+			}
+		})
+	}
+}
+
+func TestPhoenixReconnectWaitsForAnchorSecondToClose(t *testing.T) {
+	// The next second keeps the wait observable even when the test starts near
+	// a boundary. Live fills arriving during the wait must still be read.
+	timestamp := time.Now().UTC().Truncate(time.Second).Add(time.Second)
+	first := phoenixTestFill("anchor", timestamp.Format(time.RFC3339))
+	second := phoenixTestFill("second", first.Timestamp)
+	third := phoenixTestFill("later", timestamp.Add(time.Second).Format(time.RFC3339))
+	second.Price, second.QuoteQty = "84500", "-845"
+	third.Price, third.QuoteQty = "84600", "-846"
+	var requests atomic.Int32
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		wantEnd := timestamp.Add(time.Second)
+		if time.Now().Before(wantEnd) || r.URL.Query().Get("endTime") != fmt.Sprint(wantEnd.UnixMilli()) {
+			t.Errorf("recovered an unfinished second: now=%s, request=%s", time.Now(), r.URL)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{second, first}, "hasMore": false})
+	}))
+	defer rest.Close()
+	wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+			return err
+		}
+		if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
+			return err
+		}
+		if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", second, third)); err != nil {
+			return err
+		}
+		return conn.Close(websocket.StatusNormalClosure, "done")
+	})
+	p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL))
+	anchor, err := parsePhoenixFill(first, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor.UID = (&phoenixFillCounter{}).identify(anchor, first)
+	p.lastTrades["BTC"] = anchor
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	trades := make(chan quanttick.TradeEvent, 4)
+	errs := make(chan error, 1)
+	if err := p.run(ctx, trades, errs); err != nil {
+		t.Fatal(err)
+	}
+	close(trades)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var got []quanttick.TradeEvent
+	for trade := range trades {
+		got = append(got, trade)
+	}
+	assertDecimals(t, tradePrices(got), []string{"84500", "84600"})
+	if requests.Load() != 1 {
+		t.Fatalf("REST requests = %d, want 1", requests.Load())
 	}
 }
 
