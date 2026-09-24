@@ -262,7 +262,8 @@ func webSocketDataTradeLess(exchange string, stream Stream, left TradeEvent, rig
 	if exchange == "bybit" ||
 		exchange == "bybit-linear" ||
 		exchange == "bybit-inverse" ||
-		exchange == "hyperliquid" {
+		exchange == "hyperliquid" ||
+		exchange == "phoenix" {
 		return false
 	}
 	return tradeUIDLess(left.UID, right.UID)

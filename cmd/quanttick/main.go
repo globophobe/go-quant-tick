@@ -267,6 +267,11 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		exchange:    exchanges.HyperliquidName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewHyperliquid(symbols) },
 	},
+	{
+		envName:     "PHOENIX_SYMBOLS",
+		exchange:    exchanges.PhoenixName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewPhoenix(symbols) },
+	},
 }
 
 func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, error) {

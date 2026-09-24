@@ -85,6 +85,7 @@ BITFINEX_SYMBOLS=tBTCF0:USTF0
 COINBASE_SYMBOLS=BTC-USD
 DERIBIT_SYMBOLS=BTC-PERPETUAL
 HYPERLIQUID_SYMBOLS=BTC
+PHOENIX_SYMBOLS=BTC
 WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 ```
@@ -111,6 +112,7 @@ go run ./examples/coinbase
 go run ./examples/deribit
 go run ./examples/bitfinex
 go run ./examples/hyperliquid
+go run ./examples/phoenix
 ```
 
 Example with a `BTCUSDT` threshold of `10000`:
@@ -135,6 +137,8 @@ Supported exchanges
 ✅ Deribit
 
 ✅ Hyperliquid
+
+✅ Phoenix perpetuals
 
 Tests
 -----

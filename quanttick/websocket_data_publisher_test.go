@@ -161,8 +161,8 @@ func TestWebSocketDataBufferOrdersAndDeduplicatesTradesInMemory(t *testing.T) {
 	}
 }
 
-func TestWebSocketDataTradesPreserveBybitFeedOrderForEqualTimestamps(t *testing.T) {
-	for _, exchange := range []string{"bybit", "bybit-linear", "bybit-inverse"} {
+func TestWebSocketDataTradesPreserveOpaqueUIDFeedOrderForEqualTimestamps(t *testing.T) {
+	for _, exchange := range []string{"bybit", "bybit-linear", "bybit-inverse", "phoenix"} {
 		t.Run(exchange, func(t *testing.T) {
 			timestamp := time.Now().UTC().Truncate(time.Millisecond)
 			incoming := []TradeEvent{
