@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -21,10 +20,30 @@ import (
 
 func TestPhoenixPublicFillFixture(t *testing.T) {
 	// Captured from the public BTC fills stream; both rows belong to one transaction.
-	data, err := os.ReadFile("testdata/phoenix_fills.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := []byte(`{
+		"channel": "fills",
+		"symbol": "BTC",
+		"fills": [
+			{
+				"marketSymbol": "BTC",
+				"baseQty": "-0.0894",
+				"quoteQty": "7545.8782",
+				"price": "84405.79642058167",
+				"timestamp": "2026-09-24T02:48:02Z",
+				"transactionSignature": "4o1YkJDR934zZfyG9oVAZ9xCGMKSGGmahjWoZVJ5CvF5sY56HbApZPJg4twRZwupwt3TeK9TdjRicFi1oi11gphA",
+				"instructionType": "PlaceMarketOrder"
+			},
+			{
+				"marketSymbol": "BTC",
+				"baseQty": "-0.36",
+				"quoteQty": "30387.96",
+				"price": "84411",
+				"timestamp": "2026-09-24T02:48:02Z",
+				"transactionSignature": "4o1YkJDR934zZfyG9oVAZ9xCGMKSGGmahjWoZVJ5CvF5sY56HbApZPJg4twRZwupwt3TeK9TdjRicFi1oi11gphA",
+				"instructionType": "PlaceMarketOrder"
+			}
+		]
+	}`)
 	p := NewPhoenix([]string{"BTC"})
 	received := time.Now().UTC()
 	_, trades, err := p.parseMessage(data, received, &phoenixFillCounter{})
@@ -244,10 +263,38 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 }
 
 func TestPhoenixReconnectFromWithinASecondPreservesClosingPrice(t *testing.T) {
-	data, err := os.ReadFile("testdata/phoenix_recovery.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := []byte(`{
+		"data": [
+			{
+				"marketSymbol": "BTC",
+				"baseQty": "-0.0052",
+				"quoteQty": "438.958",
+				"price": "84415.00000000001",
+				"timestamp": "2026-09-24T02:48:02Z",
+				"transactionSignature": "Tcyidfw2XnDFHK4AvVuj9EiwThXLTVJNsZUVYzNqoyRpseVUyGcGRnoGyBBabCrkZVWaHknniR4LKB9qjS2XtTH",
+				"instructionType": "PlaceMarketOrder"
+			},
+			{
+				"marketSymbol": "BTC",
+				"baseQty": "-0.36",
+				"quoteQty": "30387.96",
+				"price": "84411",
+				"timestamp": "2026-09-24T02:48:02Z",
+				"transactionSignature": "4o1YkJDR934zZfyG9oVAZ9xCGMKSGGmahjWoZVJ5CvF5sY56HbApZPJg4twRZwupwt3TeK9TdjRicFi1oi11gphA",
+				"instructionType": "PlaceMarketOrder"
+			},
+			{
+				"marketSymbol": "BTC",
+				"baseQty": "-0.0894",
+				"quoteQty": "7545.8782",
+				"price": "84405.79642058167",
+				"timestamp": "2026-09-24T02:48:02Z",
+				"transactionSignature": "4o1YkJDR934zZfyG9oVAZ9xCGMKSGGmahjWoZVJ5CvF5sY56HbApZPJg4twRZwupwt3TeK9TdjRicFi1oi11gphA",
+				"instructionType": "PlaceMarketOrder"
+			}
+		],
+		"hasMore": false
+	}`)
 	var history struct {
 		Data []phoenixFill `json:"data"`
 	}
