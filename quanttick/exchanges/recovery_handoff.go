@@ -9,6 +9,8 @@ import (
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
 
+var errRecoveryHistoryBehind = errors.New("REST history has not reached the emitted trade")
+
 // Recovery must reach the replacement stream before buffered trades are published.
 // A quiet symbol gets another drain interval to allow in-flight messages to arrive.
 func recoverWithWebSocketOverlap(
@@ -99,6 +101,9 @@ func recoverWithWebSocketOverlap(
 			}
 			rows, err := recoverSymbol(ctx, symbol, cursors[symbol])
 			if err != nil {
+				if errors.Is(err, errRecoveryHistoryBehind) {
+					continue
+				}
 				var cursorGap *recoveryCursorGapError
 				if !errors.As(err, &cursorGap) {
 					recoveryErrors = append(recoveryErrors, err)

@@ -3,6 +3,7 @@ package exchanges
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -79,14 +80,29 @@ func marketTestPrice(id int) string {
 
 func TestMarketStreamsRecoverOrderedSuffixBeforeWebSocket(t *testing.T) {
 	for _, protocol := range marketTestProtocols {
-		for _, lagging := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/REST-lag=%v", protocol.name, lagging), func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			lagging    bool
+			firstIDs   []int
+			timeOffset int64
+		}{
+			{name: "current"},
+			{name: "behind-stream", lagging: true, firstIDs: []int{104, 103, 102}},
+			{name: "behind-anchor", lagging: true, firstIDs: []int{101}, timeOffset: -1},
+			{name: "same-time-missing-anchor", lagging: true, firstIDs: []int{101}},
+			{name: "empty-history", lagging: true},
+		} {
+			t.Run(protocol.name+"/"+tc.name, func(t *testing.T) {
 				millis := time.Now().UTC().UnixMilli()
 				var requests, connections atomic.Int32
 				rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Query().Get("after") != "" || r.URL.Query().Get("cursor") != "" {
+						protocol.writePage(w, nil, millis)
+						return
+					}
 					n := requests.Add(1)
-					if lagging && n == 1 {
-						protocol.writePage(w, []int{104, 103, 102}, millis)
+					if tc.lagging && n == 1 {
+						protocol.writePage(w, tc.firstIDs, millis+tc.timeOffset)
 						return
 					}
 					protocol.writePage(w, []int{106, 105, 104, 103, 102, 101}, millis)
@@ -180,7 +196,7 @@ func TestMarketStreamsRecoverOrderedSuffixBeforeWebSocket(t *testing.T) {
 				if err != nil || len(grouped) != 1 || grouped[0].Ticks != 5 || grouped[0].Price.String() != "104" || grouped[0].Volume.String() != "508" {
 					t.Fatalf("aggregated fills = %+v, err=%v", grouped, err)
 				}
-				if lagging && requests.Load() < 2 {
+				if tc.lagging && requests.Load() < 2 {
 					t.Fatal("REST handoff did not wait for overlap")
 				}
 			})
@@ -198,7 +214,7 @@ func TestMarketRecoveryMissingAnchorReportsGapAndResumes(t *testing.T) {
 					cursor = r.URL.Query().Get("cursor")
 				}
 				if cursor == "" {
-					protocol.writePage(w, []int{103}, millis)
+					protocol.writePage(w, []int{103}, millis+1)
 				} else {
 					protocol.writePage(w, nil, millis)
 				}
@@ -211,7 +227,7 @@ func TestMarketRecoveryMissingAnchorReportsGapAndResumes(t *testing.T) {
 				if err := protocol.acknowledge(ctx, conn); err != nil {
 					return err
 				}
-				if err := protocol.trade(conn, ctx, 104, millis, "100"); err != nil {
+				if err := protocol.trade(conn, ctx, 104, millis+2, "100"); err != nil {
 					return err
 				}
 				_, _, _ = conn.Read(ctx)
@@ -245,6 +261,63 @@ func TestMarketRecoveryMissingAnchorReportsGapAndResumes(t *testing.T) {
 			for range trades {
 			}
 		})
+	}
+}
+
+func TestMarketRecoveryLagRetainsBufferUntilDeadline(t *testing.T) {
+	for _, protocol := range marketTestProtocols {
+		for _, active := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/active=%v", protocol.name, active), func(t *testing.T) {
+				millis := time.Now().UnixMilli()
+				var requests atomic.Int32
+				rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests.Add(1)
+					protocol.writePage(w, []int{101}, millis-1)
+				}))
+				defer rest.Close()
+				exchange := protocol.newStream()
+				exchange.RESTURL = rest.URL
+				exchange.throttle = newRESTThrottle(0)
+				anchor, err := parseMarketTrade(protocol.name, protocol.symbol, "102", fmt.Sprint(millis), "100", "1", "buy", time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				exchange.last[protocol.symbol] = anchor
+				stream := make(chan quanttick.TradeEvent, 1)
+				var buffered []quanttick.TradeEvent
+				if active {
+					trade := anchor
+					trade.UID = "105"
+					buffered = append(buffered, trade)
+					trade.UID = "106"
+					stream <- trade
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+				defer cancel()
+				if exchange.prepare != nil {
+					if err := exchange.prepare(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				recovered, held, err := recoverWithWebSocketOverlap(
+					ctx, protocol.name, exchange.Symbols, map[string]string{protocol.symbol: anchor.UID},
+					exchange.recoverSymbol, time.Millisecond, buffered, stream, make(chan error),
+				)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("recovery ended before its deadline: %v", err)
+				}
+				if requests.Load() < 2 || len(recovered) != 0 || exchange.last[protocol.symbol].UID != anchor.UID {
+					t.Fatalf("requests=%d recovered=%v anchor=%s", requests.Load(), tradeUIDs(recovered), exchange.last[protocol.symbol].UID)
+				}
+				if active {
+					if got := tradeUIDs(held); !reflect.DeepEqual(got, []string{"105", "106"}) {
+						t.Fatalf("buffered fills = %v", got)
+					}
+				} else if len(held) != 0 {
+					t.Fatalf("unexpected buffered fills = %v", tradeUIDs(held))
+				}
+			})
+		}
 	}
 }
 

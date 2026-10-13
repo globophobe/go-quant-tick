@@ -47,6 +47,7 @@ func recoverMarketTrades(ctx context.Context, anchor quanttick.TradeEvent,
 	var rows []quanttick.TradeEvent
 	cursor := ""
 	seen := make(map[string]bool)
+scanHistory:
 	for range 100 {
 		batch, next, err := page(ctx, cursor)
 		if err != nil {
@@ -71,7 +72,7 @@ func recoverMarketTrades(ctx context.Context, anchor quanttick.TradeEvent,
 				return rows, nil
 			}
 			if trade.Timestamp.Before(anchor.Timestamp) {
-				return nil, fmt.Errorf("recovery passed missing anchor %s", anchor.UID)
+				break scanHistory
 			}
 			rows = append(rows, trade)
 			if len(rows) >= marketTradeBufferLimit {
@@ -85,6 +86,11 @@ func recoverMarketTrades(ctx context.Context, anchor quanttick.TradeEvent,
 			return nil, fmt.Errorf("recovery cursor did not advance")
 		}
 		cursor = next
+	}
+	// REST can lag the live feed. Without a newer timestamp, an absent anchor
+	// is inconclusive, including other fills in the same millisecond.
+	if len(rows) == 0 || !rows[0].Timestamp.After(anchor.Timestamp) {
+		return nil, errRecoveryHistoryBehind
 	}
 	return nil, fmt.Errorf("%s %s recovery could not find emitted trade %s", anchor.Exchange, anchor.Symbol, anchor.UID)
 }
