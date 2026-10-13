@@ -16,7 +16,7 @@ func (b *Binance) recoverTrades(ctx context.Context) ([]binanceParsedTrade, erro
 	if b.name == BinanceFuturesName {
 		return b.recoverFuturesTrades(ctx)
 	}
-	if b.name != BinanceName || len(b.lastIDs) == 0 {
+	if b.stream != "trade" || len(b.lastIDs) == 0 {
 		return nil, nil
 	}
 	sequenceIDs := cloneBinanceLastIDs(b.lastIDs)
