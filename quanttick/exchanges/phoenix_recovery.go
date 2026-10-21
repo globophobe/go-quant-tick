@@ -14,6 +14,20 @@ import (
 	quanttick "github.com/globophobe/go-quant-tick/quanttick"
 )
 
+var errPhoenixRecoveryAnchorMissing = errors.New("phoenix REST fills did not include the previous WebSocket fill")
+
+type phoenixRecoveryGapError struct {
+	err error
+}
+
+func (e *phoenixRecoveryGapError) Error() string { return e.err.Error() }
+
+func (e *phoenixRecoveryGapError) Unwrap() error { return e.err }
+
+// An exhausted recovery leaves a data gap even when its cause is a timeout or
+// transport failure. Keep it reportable instead of treating it as a disconnect.
+func (e *phoenixRecoveryGapError) ClassifyTransient() (bool, bool) { return false, true }
+
 // Recovery reads the last emitted second to locate the anchor, then emits only
 // its suffix. Appending previously unseen predecessors from that second would
 // corrupt closing prices. Read all REST pages before reversing the window so
@@ -22,20 +36,46 @@ import (
 // occurrence the previous session observed. Report a gap instead of replaying it.
 // The fill feed supplies no sequence with which to prove continuity, so events
 // retain IsSequential=false even after a successful REST overlap.
+// A missing anchor may reflect REST lag: retry complete windows under run's
+// recovery deadline, with the original anchor and end fixed. Finish other markets
+// before retrying lagging ones; malformed or ambiguous history fails immediately.
 func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quanttick.TradeEvent, error) {
 	var recovered []quanttick.TradeEvent
 	var recoveryErrors []error
+	pending := make(map[string]quanttick.TradeEvent)
 	for _, symbol := range p.Symbols {
-		anchor, ok := p.lastTrades[symbol]
-		if !ok {
-			continue
+		if anchor, ok := p.lastTrades[symbol]; ok {
+			pending[symbol] = anchor
 		}
-		rows, err := p.recoverSymbol(ctx, symbol, anchor, until)
-		if err != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("phoenix recovery gap for %s: %w", symbol, err))
-			continue
+	}
+	for len(pending) > 0 {
+		for _, symbol := range p.Symbols {
+			anchor, ok := pending[symbol]
+			if !ok {
+				continue
+			}
+			rows, err := p.recoverSymbol(ctx, symbol, anchor, until)
+			if errors.Is(err, errPhoenixRecoveryAnchorMissing) {
+				continue
+			}
+			delete(pending, symbol)
+			if err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("phoenix recovery gap for %s: %w", symbol, err))
+				continue
+			}
+			recovered = append(recovered, rows...)
 		}
-		recovered = append(recovered, rows...)
+		if len(pending) == 0 {
+			break
+		}
+		if err := sleepContext(ctx, phoenixRecoveryRequestInterval); err != nil {
+			for _, symbol := range p.Symbols {
+				if _, ok := pending[symbol]; ok {
+					recoveryErrors = append(recoveryErrors, fmt.Errorf("phoenix recovery gap for %s: %w: %w", symbol, errPhoenixRecoveryAnchorMissing, err))
+				}
+			}
+			break
+		}
 	}
 	sortTradeEventsChronologically(recovered)
 	return recovered, errors.Join(recoveryErrors...)
@@ -135,8 +175,11 @@ func (p *Phoenix) recoverSymbol(ctx context.Context, symbol string, anchor quant
 		}
 		trades = append(trades, trade)
 	}
-	if anchorIndex < 0 || trades[anchorIndex].UID != anchor.UID {
-		return nil, fmt.Errorf("phoenix REST fills did not include the previous WebSocket fill")
+	if anchorIndex < 0 {
+		return nil, errPhoenixRecoveryAnchorMissing
+	}
+	if trades[anchorIndex].UID != anchor.UID {
+		return nil, fmt.Errorf("phoenix REST anchor occurrence differs from the previous WebSocket fill")
 	}
 	return trades[anchorIndex+1:], nil
 }

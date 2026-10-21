@@ -272,6 +272,26 @@ var exchangeEnvConfigs = []exchangeEnvConfig{
 		exchange:    exchanges.PhoenixName,
 		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewPhoenix(symbols) },
 	},
+	{
+		envName:     "BINANCE_US_SYMBOLS",
+		exchange:    exchanges.BinanceUSName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewBinanceUS(symbols) },
+	},
+	{
+		envName:     "ASTER_SYMBOLS",
+		exchange:    exchanges.AsterName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewAster(symbols) },
+	},
+	{
+		envName:     "OKX_SYMBOLS",
+		exchange:    exchanges.OKXName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewOKX(symbols) },
+	},
+	{
+		envName:     "UPBIT_SYMBOLS",
+		exchange:    exchanges.UpbitName,
+		newExchange: func(symbols []string) quanttick.Exchange { return exchanges.NewUpbit(symbols) },
+	},
 }
 
 func exchangesFromEnv() ([]quanttick.Exchange, map[string]quanttick.Decimal, error) {
