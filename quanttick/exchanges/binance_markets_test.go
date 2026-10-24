@@ -25,6 +25,10 @@ func TestBinanceCompatibleMarketsRecoverIndividualTrades(t *testing.T) {
 			var requests, connections atomic.Int32
 			rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
+				if test.name == AsterName && r.URL.Query().Get("fromId") == "" {
+					fmt.Fprint(w, `[{"id":104,"price":"100","qty":"2","time":1791870963099,"isBuyerMaker":true}]`)
+					return
+				}
 				if r.URL.Path != "/historicalTrades" || r.URL.Query().Get("fromId") != "103" || r.URL.Query().Get("symbol") != "BTCUSDT" || r.Header.Get("X-MBX-APIKEY") != "" {
 					t.Errorf("invalid public recovery request: %s", r.URL)
 				}
@@ -90,7 +94,11 @@ func TestBinanceCompatibleMarketsRecoverIndividualTrades(t *testing.T) {
 			cancel()
 			for range trades {
 			}
-			if !reflect.DeepEqual(ids, []string{"102", "103", "104"}) || requests.Load() != 1 {
+			wantRequests := int32(1)
+			if test.name == AsterName {
+				wantRequests = 2
+			}
+			if !reflect.DeepEqual(ids, []string{"102", "103", "104"}) || requests.Load() != wantRequests {
 				t.Fatalf("recovery ids=%v requests=%d", ids, requests.Load())
 			}
 		})

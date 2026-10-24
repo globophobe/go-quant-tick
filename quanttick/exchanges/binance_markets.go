@@ -24,7 +24,7 @@ func NewBinanceUS(symbols []string, options ...BinanceOption) *Binance {
 	return exchange
 }
 
-// Aster's trade stream and historicalTrades share individual trade IDs.
+// Aster's trade stream and historicalTrades share individual IDs with genuine gaps.
 func NewAster(symbols []string, options ...BinanceOption) *Binance {
 	exchange := NewBinance(symbols)
 	exchange.name = AsterName
