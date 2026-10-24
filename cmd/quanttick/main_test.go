@@ -440,3 +440,43 @@ func TestFlushTimeoutFallsBackForInvalidDuration(t *testing.T) {
 		t.Fatalf("timeout = %s, want 5s", got)
 	}
 }
+
+func TestExchangesFromEnvIncludesAdditionalMarkets(t *testing.T) {
+	for _, config := range exchangeEnvConfigs {
+		t.Setenv(config.envName, "")
+	}
+	t.Setenv("BINANCE_US_SYMBOLS", "BTCUSDT=1000")
+	t.Setenv("ASTER_SYMBOLS", "BTCUSDT=2000")
+	t.Setenv("OKX_SYMBOLS", "BTC-USDT,BTC-USDT-SWAP=3000")
+	t.Setenv("UPBIT_SYMBOLS", "KRW-BTC=1000000")
+	clients, thresholds, err := exchangesFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := []string{"binance-us", "aster", "okx", "upbit"}
+	if len(clients) != len(wantNames) {
+		t.Fatalf("clients = %d", len(clients))
+	}
+	for i, client := range clients {
+		if client.Name() != wantNames[i] {
+			t.Fatalf("client %d = %s", i, client.Name())
+		}
+	}
+	for _, test := range []struct{ exchange, symbol, threshold string }{
+		{"binance-us", "BTCUSDT", "1000"}, {"aster", "BTCUSDT", "2000"},
+		{"okx", "BTC-USDT-SWAP", "3000"}, {"upbit", "KRW-BTC", "1000000"},
+	} {
+		if got := thresholds[quanttick.ExchangeSymbolKey(test.exchange, test.symbol)]; !got.Equal(quanttick.MustDecimal(test.threshold)) {
+			t.Fatalf("%s threshold = %s", test.exchange, got)
+		}
+	}
+	okx := clients[2].(*exchanges.OKX)
+	if len(okx.Symbols) != 2 || okx.Symbols[1] != "BTC-USDT-SWAP" {
+		t.Fatalf("OKX symbols = %v", okx.Symbols)
+	}
+	for _, index := range []int{0, 1} {
+		if clients[index].(*exchanges.Binance).APIKey != "" {
+			t.Fatal("new public markets inherited Binance credentials")
+		}
+	}
+}

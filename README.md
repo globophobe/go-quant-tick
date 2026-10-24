@@ -86,11 +86,15 @@ COINBASE_SYMBOLS=BTC-USD
 DERIBIT_SYMBOLS=BTC-PERPETUAL
 HYPERLIQUID_SYMBOLS=BTC
 PHOENIX_SYMBOLS=BTC
+BINANCE_US_SYMBOLS=BTCUSDT
+ASTER_SYMBOLS=BTCUSDT
+OKX_SYMBOLS=BTC-USDT,BTC-USDT-SWAP
+UPBIT_SYMBOLS=KRW-BTC=1000000
 WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 ```
 
-Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
+Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`. Thresholds use the market's quote currency, including KRW for `KRW-BTC`.
 
 `WEBSOCKET_DATA_STREAMS` accepts:
 
@@ -113,6 +117,10 @@ go run ./examples/deribit
 go run ./examples/bitfinex
 go run ./examples/hyperliquid
 go run ./examples/phoenix
+go run ./examples/binance-us
+go run ./examples/aster
+go run ./examples/okx
+go run ./examples/upbit
 ```
 
 Example with a `BTCUSDT` threshold of `10000`:
@@ -124,7 +132,9 @@ BINANCE_SYMBOLS=BTCUSDT=10000 go run ./examples/binance
 Supported exchanges
 -------------------
 
-✅ Binance
+✅ Binance and Binance.US
+
+✅ Aster perpetuals
 
 ✅ Binance Futures
 
@@ -139,6 +149,10 @@ Supported exchanges
 ✅ Hyperliquid
 
 ✅ Phoenix perpetuals
+
+✅ OKX spot and linear swaps
+
+✅ Upbit spot
 
 Tests
 -----
