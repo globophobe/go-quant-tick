@@ -3,6 +3,7 @@ package exchanges
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -24,6 +25,7 @@ type marketStream struct {
 	ReconnectDelay      time.Duration
 	SubscriptionTimeout time.Duration
 	HeartbeatInterval   time.Duration
+	HeartbeatTimeout    time.Duration
 
 	name          string
 	prepare       func(context.Context) error
@@ -53,6 +55,7 @@ func newMarketStream(name, endpoint, restURL string, symbols []string) *marketSt
 		ReconnectDelay:      time.Second,
 		SubscriptionTimeout: websocketSubscriptionTimeout,
 		HeartbeatInterval:   20 * time.Second,
+		HeartbeatTimeout:    10 * time.Second,
 		last:                make(map[string]quanttick.TradeEvent),
 		seen:                make(map[string]*seenTradeIDs),
 		throttle:            newRESTThrottle(time.Second / 2),
@@ -116,9 +119,10 @@ func (m *marketStream) run(ctx context.Context, trades chan<- quanttick.TradeEve
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	pongs := make(chan struct{}, 1)
+	heartbeatErr := make(chan error, 1)
 	stream, streamErr := m.startReader(streamCtx, conn, backlog, pongs)
 	if m.HeartbeatInterval > 0 {
-		go m.heartbeat(streamCtx, conn, pongs)
+		go m.heartbeat(streamCtx, conn, pongs, heartbeatErr)
 	}
 	cursors := make(map[string]string, len(m.last))
 	for symbol, trade := range m.last {
@@ -152,6 +156,13 @@ func (m *marketStream) run(ctx context.Context, trades chan<- quanttick.TradeEve
 		}
 	}
 	err = <-streamErr
+	// A failed heartbeat closes the socket itself; report that cause instead of
+	// the reader's resulting closed-connection error.
+	select {
+	case failure := <-heartbeatErr:
+		return failure
+	default:
+	}
 	if isNormalWebSocketClose(err) {
 		return nil
 	}
@@ -224,7 +235,9 @@ func (m *marketStream) startReader(ctx context.Context, conn *websocket.Conn, ba
 	return trades, errs
 }
 
-func (m *marketStream) heartbeat(ctx context.Context, conn *websocket.Conn, pongs <-chan struct{}) {
+// heartbeat sends a failure to failed before closing the connection, so the
+// reader error caused by that close is never the first error observed.
+func (m *marketStream) heartbeat(ctx context.Context, conn *websocket.Conn, pongs <-chan struct{}, failed chan<- error) {
 	ticker := time.NewTicker(m.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -233,7 +246,7 @@ func (m *marketStream) heartbeat(ctx context.Context, conn *websocket.Conn, pong
 			return
 		case <-ticker.C:
 		}
-		pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		pingCtx, cancel := context.WithTimeout(ctx, m.HeartbeatTimeout)
 		var err error
 		if m.textPing {
 			select {
@@ -253,6 +266,15 @@ func (m *marketStream) heartbeat(ctx context.Context, conn *websocket.Conn, pong
 		}
 		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				err = fmt.Errorf("heartbeat pong not received within %s", m.HeartbeatTimeout)
+			} else {
+				err = fmt.Errorf("heartbeat: %w", err)
+			}
+			failed <- err
 			_ = conn.CloseNow()
 			return
 		}

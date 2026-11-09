@@ -416,3 +416,31 @@ func TestMarketHeartbeatKeepsQuietStreamAlive(t *testing.T) {
 		})
 	}
 }
+
+func TestMarketHeartbeatTimeoutReportsCauseInsteadOfClosedConnection(t *testing.T) {
+	for _, protocol := range marketTestProtocols {
+		t.Run(protocol.name, func(t *testing.T) {
+			endpoint := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				if err := protocol.acknowledge(ctx, conn); err != nil {
+					return err
+				}
+				// Never read again: protocol pings go unanswered and text pings get no pong.
+				<-ctx.Done()
+				return nil
+			})
+			exchange := protocol.newStream()
+			exchange.URL = endpoint
+			exchange.HeartbeatInterval, exchange.HeartbeatTimeout = 10*time.Millisecond, 30*time.Millisecond
+			exchange.SubscriptionTimeout = time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := exchange.run(ctx, make(chan quanttick.TradeEvent, 10), make(chan error, 1))
+			if err == nil || !strings.Contains(err.Error(), "heartbeat pong not received within 30ms") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
