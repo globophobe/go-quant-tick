@@ -13,7 +13,7 @@ import (
 
 const (
 	OKXName    = "okx"
-	OKXURL     = "wss://ws.okx.com:8443/ws/v5/business"
+	OKXURL     = "wss://ws.okx.com/ws/v5/business"
 	OKXRESTURL = "https://www.okx.com/api/v5"
 )
 
