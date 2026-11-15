@@ -54,42 +54,18 @@ func (b *Binance) recoverSpotSymbol(
 	sequenceIDs map[string]int64,
 ) ([]binanceParsedTrade, error) {
 	recovered := make([]binanceParsedTrade, 0)
-	idRangePages := b.name == AsterName
-	var latestID int64
-	if idRangePages {
-		// Aster's limit spans raw IDs, including holes. Freeze a latest ID so
-		// short and empty pages cannot prematurely end recovery.
-		latest, err := b.fetchRawRecoveryPage(ctx, symbol, nil, 1)
-		if err != nil {
-			return recovered, err
-		}
-		if len(latest) != 1 || latest[0].TradeID <= 0 {
-			return recovered, fmt.Errorf("aster recovery for %s did not return a latest raw trade", symbol)
-		}
-		latestID = latest[0].TradeID
-		if fromID > latestID {
-			return recovered, nil
-		}
-	}
 	for page := 0; page < binanceRecoveryMaxPages; page++ {
-		payloads, err := b.fetchRawRecoveryPage(ctx, symbol, &fromID, binanceRecoveryPageLimit)
+		payloads, err := b.fetchRawRecoveryPage(ctx, symbol, fromID)
 		if err != nil {
 			return recovered, err
 		}
 		if len(payloads) == 0 {
-			if !idRangePages {
-				return recovered, nil
-			}
-			if latestID-fromID < binanceRecoveryPageLimit {
-				return recovered, fmt.Errorf("aster recovery for %s did not contain latest trade %d", symbol, latestID)
-			}
-			fromID += binanceRecoveryPageLimit
-			continue
+			return recovered, nil
 		}
 
 		receivedAt := time.Now().UTC()
 		for _, payload := range payloads {
-			if payload.TradeID < fromID || (!idRangePages && payload.TradeID != fromID) {
+			if payload.TradeID != fromID {
 				return recovered, fmt.Errorf(
 					"%s recovery for %s expected trade %d, got %d",
 					b.name,
@@ -97,9 +73,6 @@ func (b *Binance) recoverSpotSymbol(
 					fromID,
 					payload.TradeID,
 				)
-			}
-			if idRangePages && payload.TradeID > latestID {
-				return recovered, fmt.Errorf("aster recovery for %s did not contain latest trade %d", symbol, latestID)
 			}
 			parsed, ok, err := b.buildParsedTrade(
 				binanceTradeMessage{
@@ -121,11 +94,8 @@ func (b *Binance) recoverSpotSymbol(
 			}
 			recovered = append(recovered, parsed)
 			fromID = payload.TradeID + 1
-			if idRangePages && payload.TradeID == latestID {
-				return recovered, nil
-			}
 		}
-		if !idRangePages && len(payloads) < binanceRecoveryPageLimit {
+		if len(payloads) < binanceRecoveryPageLimit {
 			return recovered, nil
 		}
 	}
@@ -140,8 +110,7 @@ func (b *Binance) recoverSpotSymbol(
 func (b *Binance) fetchRawRecoveryPage(
 	ctx context.Context,
 	symbol string,
-	fromID *int64,
-	limit int,
+	fromID int64,
 ) ([]binanceSpotRecoveryTrade, error) {
 	endpoint, err := url.Parse(strings.TrimRight(b.RESTURL, "/") + "/historicalTrades")
 	if err != nil {
@@ -149,10 +118,8 @@ func (b *Binance) fetchRawRecoveryPage(
 	}
 	query := endpoint.Query()
 	query.Set("symbol", symbol)
-	if fromID != nil {
-		query.Set("fromId", strconv.FormatInt(*fromID, 10))
-	}
-	query.Set("limit", strconv.Itoa(limit))
+	query.Set("fromId", strconv.FormatInt(fromID, 10))
+	query.Set("limit", strconv.Itoa(binanceRecoveryPageLimit))
 	endpoint.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
