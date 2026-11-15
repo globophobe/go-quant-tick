@@ -90,7 +90,7 @@ WEBSOCKET_DATA_STREAMS=significant-trades
 SIGNIFICANT_TRADE_FILTER=1000
 ```
 
-Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`. Thresholds use the market's quote currency.
+Symbol lists are comma-separated. A symbol can include an optional significant trade threshold as `SYMBOL=THRESHOLD`; symbols without an override use `SIGNIFICANT_TRADE_FILTER`.
 
 `WEBSOCKET_DATA_STREAMS` accepts:
 
