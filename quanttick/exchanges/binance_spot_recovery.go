@@ -16,7 +16,7 @@ func (b *Binance) recoverTrades(ctx context.Context) ([]binanceParsedTrade, erro
 	if b.name == BinanceFuturesName {
 		return b.recoverFuturesTrades(ctx)
 	}
-	if b.name != BinanceName || len(b.lastIDs) == 0 {
+	if b.stream != "trade" || len(b.lastIDs) == 0 {
 		return nil, nil
 	}
 	sequenceIDs := cloneBinanceLastIDs(b.lastIDs)
@@ -55,50 +55,9 @@ func (b *Binance) recoverSpotSymbol(
 ) ([]binanceParsedTrade, error) {
 	recovered := make([]binanceParsedTrade, 0)
 	for page := 0; page < binanceRecoveryMaxPages; page++ {
-		endpoint, err := url.Parse(strings.TrimRight(b.RESTURL, "/") + "/historicalTrades")
+		payloads, err := b.fetchRawRecoveryPage(ctx, symbol, fromID)
 		if err != nil {
-			return recovered, fmt.Errorf("build binance spot recovery URL: %w", err)
-		}
-		query := endpoint.Query()
-		query.Set("symbol", symbol)
-		query.Set("fromId", strconv.FormatInt(fromID, 10))
-		query.Set("limit", strconv.Itoa(binanceRecoveryPageLimit))
-		endpoint.RawQuery = query.Encode()
-
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-		if err != nil {
-			return recovered, fmt.Errorf("build binance spot recovery request: %w", err)
-		}
-		if b.APIKey != "" {
-			request.Header.Set("X-MBX-APIKEY", b.APIKey)
-		}
-		var response *http.Response
-		for {
-			if err := b.recoveryThrottle.wait(ctx); err != nil {
-				return recovered, fmt.Errorf("wait for binance spot recovery rate limit: %w", err)
-			}
-			response, err = b.HTTPClient.Do(request)
-			if err != nil {
-				return recovered, fmt.Errorf("fetch binance spot recovery for %s: %w", symbol, err)
-			}
-			delay, rateErr := binanceResponseDelay(response.Header, time.Now().UTC(), b.RecoveryMaxWeight)
-			if rateErr != nil {
-				response.Body.Close()
-				return recovered, fmt.Errorf("fetch binance spot recovery for %s: %w", symbol, rateErr)
-			}
-			b.recoveryThrottle.deferFor(delay)
-			if response.StatusCode != http.StatusTooManyRequests && response.StatusCode != http.StatusTeapot {
-				break
-			}
-			response.Body.Close()
-			if delay <= 0 {
-				b.recoveryThrottle.deferFor(binanceRecoveryRetryDelay)
-			}
-		}
-
-		var payloads []binanceSpotRecoveryTrade
-		if err := decodeRecoveryResponse(response, &payloads); err != nil {
-			return recovered, fmt.Errorf("fetch binance spot recovery for %s: %w", symbol, err)
+			return recovered, err
 		}
 		if len(payloads) == 0 {
 			return recovered, nil
@@ -108,7 +67,8 @@ func (b *Binance) recoverSpotSymbol(
 		for _, payload := range payloads {
 			if payload.TradeID != fromID {
 				return recovered, fmt.Errorf(
-					"binance spot recovery for %s expected trade %d, got %d",
+					"%s recovery for %s expected trade %d, got %d",
+					b.name,
 					symbol,
 					fromID,
 					payload.TradeID,
@@ -133,17 +93,71 @@ func (b *Binance) recoverSpotSymbol(
 				return recovered, errors.New("parse binance spot recovery trade: empty trade")
 			}
 			recovered = append(recovered, parsed)
-			fromID++
+			fromID = payload.TradeID + 1
 		}
 		if len(payloads) < binanceRecoveryPageLimit {
 			return recovered, nil
 		}
 	}
 	return recovered, fmt.Errorf(
-		"binance spot recovery for %s exceeded %d pages",
+		"%s recovery for %s exceeded %d pages",
+		b.name,
 		symbol,
 		binanceRecoveryMaxPages,
 	)
+}
+
+func (b *Binance) fetchRawRecoveryPage(
+	ctx context.Context,
+	symbol string,
+	fromID int64,
+) ([]binanceSpotRecoveryTrade, error) {
+	endpoint, err := url.Parse(strings.TrimRight(b.RESTURL, "/") + "/historicalTrades")
+	if err != nil {
+		return nil, fmt.Errorf("build %s recovery URL: %w", b.name, err)
+	}
+	query := endpoint.Query()
+	query.Set("symbol", symbol)
+	query.Set("fromId", strconv.FormatInt(fromID, 10))
+	query.Set("limit", strconv.Itoa(binanceRecoveryPageLimit))
+	endpoint.RawQuery = query.Encode()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build %s recovery request: %w", b.name, err)
+	}
+	if b.APIKey != "" {
+		request.Header.Set("X-MBX-APIKEY", b.APIKey)
+	}
+	var response *http.Response
+	for {
+		if err := b.recoveryThrottle.wait(ctx); err != nil {
+			return nil, fmt.Errorf("wait for %s recovery rate limit: %w", b.name, err)
+		}
+		response, err = b.HTTPClient.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s recovery for %s: %w", b.name, symbol, err)
+		}
+		delay, rateErr := binanceResponseDelay(response.Header, time.Now().UTC(), b.RecoveryMaxWeight)
+		if rateErr != nil {
+			response.Body.Close()
+			return nil, fmt.Errorf("fetch %s recovery for %s: %w", b.name, symbol, rateErr)
+		}
+		b.recoveryThrottle.deferFor(delay)
+		if response.StatusCode != http.StatusTooManyRequests && response.StatusCode != http.StatusTeapot {
+			break
+		}
+		response.Body.Close()
+		if delay <= 0 {
+			b.recoveryThrottle.deferFor(binanceRecoveryRetryDelay)
+		}
+	}
+
+	var payloads []binanceSpotRecoveryTrade
+	if err := decodeRecoveryResponse(response, &payloads); err != nil {
+		return nil, fmt.Errorf("fetch %s recovery for %s: %w", b.name, symbol, err)
+	}
+	return payloads, nil
 }
 
 type binanceSpotRecoveryTrade struct {

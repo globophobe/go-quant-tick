@@ -3,6 +3,7 @@ package exchanges
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -200,7 +201,7 @@ func TestPhoenixReconnectRecoversPagesAndRemovesLiveOverlap(t *testing.T) {
 			if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", first)); err != nil {
 				return err
 			}
-			return conn.Close(websocket.StatusNormalClosure, "reconnect")
+			return conn.Close(websocket.StatusServiceRestart, "service_restart")
 		}
 		select {
 		case <-recoveryStarted:
@@ -620,7 +621,6 @@ func TestPhoenixRecoveryRejectsIncompleteHistory(t *testing.T) {
 		response any
 		want     string
 	}{
-		{"missing anchor", map[string]any{"data": []phoenixFill{}, "hasMore": false}, "previous WebSocket fill"},
 		{"missing hasMore", map[string]any{"data": []phoenixFill{fill}}, "malformed"},
 		{"stuck cursor", map[string]any{"data": []phoenixFill{fill}, "hasMore": true, "nextCursor": "repeat"}, "pagination did not advance"},
 		{"empty cursor", map[string]any{"data": []phoenixFill{fill}, "hasMore": true}, "pagination did not advance"},
@@ -633,7 +633,9 @@ func TestPhoenixRecoveryRejectsIncompleteHistory(t *testing.T) {
 			p := NewPhoenix([]string{"BTC"}, WithPhoenixRESTURL(rest.URL))
 			p.recoveryThrottle = newRESTThrottle(0)
 			p.lastTrades["BTC"] = anchor
-			rows, err := p.recoverTrades(context.Background(), anchor.Timestamp.Add(5*time.Second))
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			rows, err := p.recoverTrades(ctx, anchor.Timestamp.Add(5*time.Second))
 			if err == nil || !strings.Contains(err.Error(), test.want) || len(rows) != 0 {
 				t.Fatalf("rows=%v error=%v", rows, err)
 			}
@@ -674,50 +676,86 @@ func TestPhoenixRecoveryHonorsRetryAfterAndCancellation(t *testing.T) {
 }
 
 func TestPhoenixRecoveryFailureReportsGapAndKeepsLiveFills(t *testing.T) {
-	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}))
-	defer rest.Close()
-	wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
-		if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
-			return err
-		}
-		if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
-			return err
-		}
-		if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", phoenixTestFill("live", "2026-09-24T00:00:02Z"))); err != nil {
-			return err
-		}
-		_, _, _ = conn.Read(ctx)
-		return nil
-	})
-	p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL))
-	anchor, _ := parsePhoenixFill(phoenixTestFill("previous", "2026-09-24T00:00:01Z"), time.Now())
-	p.lastTrades["BTC"] = anchor
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	trades := make(chan quanttick.TradeEvent, 1)
-	errs := make(chan error, 1)
-	done := make(chan error, 1)
-	go func() { done <- p.run(ctx, trades, errs) }()
-	select {
-	case err := <-errs:
-		if !strings.Contains(err.Error(), "recovery gap for BTC") || !strings.Contains(err.Error(), "503") {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal("recovery failure was not reported")
+	for _, test := range []struct {
+		name           string
+		lagThenTimeout bool
+	}{
+		{"HTTP 503", false},
+		{"timeout after lagging history", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := requests.Add(1)
+				if !test.lagThenTimeout {
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				} else if n == 1 {
+					json.NewEncoder(w).Encode(map[string]any{"data": []phoenixFill{}, "hasMore": false})
+				} else {
+					<-r.Context().Done()
+				}
+			}))
+			defer rest.Close()
+			wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
+					return err
+				}
+				if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", phoenixTestFill("live", "2026-09-24T00:00:02Z"))); err != nil {
+					return err
+				}
+				_, _, _ = conn.Read(ctx)
+				return nil
+			})
+			client := rest.Client()
+			client.Timeout = 100 * time.Millisecond
+			p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL), WithPhoenixHTTPClient(client))
+			fill := phoenixTestFill("previous", "2026-09-24T00:00:01Z")
+			anchor, _ := parsePhoenixFill(fill, time.Now())
+			anchor.UID = (&phoenixFillCounter{}).identify(anchor, fill)
+			p.lastTrades["BTC"] = anchor
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			trades := make(chan quanttick.TradeEvent, 1)
+			errs := make(chan error, 1)
+			done := make(chan error, 1)
+			go func() { done <- p.run(ctx, trades, errs) }()
+			select {
+			case err := <-errs:
+				if !strings.Contains(err.Error(), "recovery gap for BTC") {
+					t.Fatal(err)
+				}
+				if test.lagThenTimeout {
+					if !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 2 {
+						t.Fatalf("requests=%d error=%v, want a timeout on the second attempt", requests.Load(), err)
+					}
+				} else if !strings.Contains(err.Error(), "503") || requests.Load() != 1 {
+					t.Fatalf("requests=%d error=%v, want an immediate 503 gap", requests.Load(), err)
+				}
+				var classified interface{ ClassifyTransient() (bool, bool) }
+				if !errors.As(err, &classified) {
+					t.Fatalf("recovery gap lacks an explicit reporting classification: %v", err)
+				}
+				if transient, known := classified.ClassifyTransient(); transient || !known {
+					t.Fatalf("gap classification=(%v, %v), want (false, true)", transient, known)
+				}
+			case <-ctx.Done():
+				t.Fatal("recovery failure was not reported")
+			}
+			select {
+			case trade := <-trades:
+				if trade.Timestamp.Second() != 2 {
+					t.Fatalf("wrong live fill: %+v", trade)
+				}
+			case <-ctx.Done():
+				t.Fatal("recovery failure blocked live fills")
+			}
+			cancel()
+			<-done
+		})
 	}
-	select {
-	case trade := <-trades:
-		if trade.Timestamp.Second() != 2 {
-			t.Fatalf("wrong live fill: %+v", trade)
-		}
-	case <-ctx.Done():
-		t.Fatal("recovery failure blocked live fills")
-	}
-	cancel()
-	<-done
 }
 
 func TestPhoenixReaderBoundsCombinedBacklog(t *testing.T) {

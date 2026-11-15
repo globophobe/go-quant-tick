@@ -86,7 +86,11 @@ func (p *Phoenix) Trades(ctx context.Context) (<-chan quanttick.TradeEvent, <-ch
 		for ctx.Err() == nil {
 			startedAt := time.Now()
 			if err := p.run(ctx, trades, errs); err != nil && ctx.Err() == nil {
-				sendError(ctx, errs, err)
+				// Service restarts are expected, including before subscription ack.
+				// Recovery gaps are reported separately by run and stay actionable.
+				if websocket.CloseStatus(err) != websocket.StatusServiceRestart {
+					sendError(ctx, errs, err)
+				}
 			}
 			if err := sleepContext(ctx, backoff.Next(time.Since(startedAt))); err != nil {
 				return
@@ -152,7 +156,7 @@ func (p *Phoenix) run(ctx context.Context, trades chan<- quanttick.TradeEvent, e
 	}
 	cancelRecovery()
 	if recoveryErr != nil {
-		sendError(ctx, errs, recoveryErr)
+		sendError(ctx, errs, &phoenixRecoveryGapError{err: recoveryErr})
 	}
 	for _, trade := range recovered {
 		if err := p.emitTrade(ctx, trades, trade); err != nil {
