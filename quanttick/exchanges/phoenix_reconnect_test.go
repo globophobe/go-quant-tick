@@ -159,12 +159,13 @@ func TestPhoenixRecoveryRetriesLaggingHistoryWithBufferedFills(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.run(ctx, trades, errs) }()
 	var got []quanttick.TradeEvent
+	var gaps []error
 	for len(got) < 3 {
 		select {
 		case trade := <-trades:
 			got = append(got, trade)
 		case err := <-errs:
-			t.Fatalf("unexpected recovery error: %v", err)
+			gaps = append(gaps, err)
 		case <-ctx.Done():
 			t.Fatal("timed out waiting for recovered and buffered fills")
 		}
@@ -177,7 +178,10 @@ func TestPhoenixRecoveryRetriesLaggingHistoryWithBufferedFills(t *testing.T) {
 		t.Errorf("duplicate trade after retry: %+v", extra)
 	}
 	for err := range errs {
-		t.Errorf("unexpected recovery error: %v", err)
+		gaps = append(gaps, err)
+	}
+	if len(gaps) != 1 || !strings.Contains(gaps[0].Error(), "coverage through the replacement WebSocket stream is unverified") {
+		t.Fatalf("recovery errors=%v, want one unverified handoff gap after REST lag", gaps)
 	}
 	counter := phoenixFillCounter{}
 	var wantIDs []string
@@ -200,6 +204,97 @@ func TestPhoenixRecoveryRetriesLaggingHistoryWithBufferedFills(t *testing.T) {
 		if query.Get("startTime") != "1790208001000" || query.Get("endTime") != end || query.Get("cursor") != cursor {
 			t.Fatalf("recovery changed its original window or cursor: %v", query)
 		}
+	}
+}
+
+func TestPhoenixRecoveryReportsLaggingTailAfterAnchorAppears(t *testing.T) {
+	first := phoenixTestFill("anchor", "2026-09-24T00:00:01Z")
+	second := phoenixTestFill("recovered", "2026-09-24T00:00:02Z")
+	missed := phoenixTestFill("missed", "2026-09-24T00:00:03Z")
+	live := phoenixTestFill("live", "2026-09-24T00:00:04Z")
+	for _, test := range []struct {
+		name    string
+		partial bool
+	}{
+		{"anchor only", false},
+		{"partial suffix", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rows := []phoenixFill{}
+				switch requests.Add(1) {
+				case 1:
+				case 2:
+					rows = []phoenixFill{first}
+					if test.partial {
+						rows = []phoenixFill{second, first}
+					}
+				default:
+					rows = []phoenixFill{live, missed, second, first}
+				}
+				json.NewEncoder(w).Encode(map[string]any{"data": rows, "hasMore": false})
+			}))
+			defer rest.Close()
+			wsURL := newExchangeWebSocketServer(t, func(ctx context.Context, conn *websocket.Conn) error {
+				if _, err := readExchangeWebSocketMessage(ctx, conn); err != nil {
+					return err
+				}
+				if err := conn.Write(ctx, websocket.MessageText, phoenixTestMessage(t, "BTC", live)); err != nil {
+					return err
+				}
+				if err := writeExchangeWebSocketMessage(ctx, conn, phoenixTestAck("BTC")); err != nil {
+					return err
+				}
+				_, _, _ = conn.Read(ctx)
+				return nil
+			})
+			p := NewPhoenix([]string{"BTC"}, WithPhoenixURL(wsURL), WithPhoenixRESTURL(rest.URL), WithPhoenixHTTPClient(rest.Client()))
+			anchor, _ := parsePhoenixFill(first, time.Now())
+			anchor.UID = (&phoenixFillCounter{}).identify(anchor, first)
+			p.lastTrades["BTC"] = anchor
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			trades := make(chan quanttick.TradeEvent, 4)
+			errs := make(chan error, 2)
+			done := make(chan error, 1)
+			go func() { done <- p.run(ctx, trades, errs) }()
+			want := []phoenixFill{live}
+			if test.partial {
+				want = []phoenixFill{second, live}
+			}
+			counter := phoenixFillCounter{}
+			for _, fill := range want {
+				expected, _ := parsePhoenixFill(fill, time.Now())
+				expected.UID = counter.identify(expected, fill)
+				select {
+				case trade := <-trades:
+					if trade.UID != expected.UID {
+						t.Fatalf("emitted %s, want %s", trade.UID, expected.UID)
+					}
+				case <-ctx.Done():
+					t.Fatal("gap reporting blocked recovered or live fills")
+				}
+			}
+			cancel()
+			<-done
+			close(trades)
+			close(errs)
+			for extra := range trades {
+				t.Errorf("unexpected extra trade: %+v", extra)
+			}
+			var gaps []error
+			for err := range errs {
+				gaps = append(gaps, err)
+			}
+			var gap *phoenixRecoveryGapError
+			if len(gaps) != 1 || !errors.As(gaps[0], &gap) || !strings.Contains(gaps[0].Error(), "coverage through the replacement WebSocket stream is unverified") {
+				t.Fatalf("recovery errors=%v, want an explicit gap for the missing tail", gaps)
+			}
+			if requests.Load() != 2 {
+				t.Fatalf("REST requests=%d, want two", requests.Load())
+			}
+		})
 	}
 }
 

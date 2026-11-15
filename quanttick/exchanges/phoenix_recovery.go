@@ -39,10 +39,13 @@ func (e *phoenixRecoveryGapError) ClassifyTransient() (bool, bool) { return fals
 // A missing anchor may reflect REST lag: retry complete windows under run's
 // recovery deadline, with the original anchor and end fixed. Finish other markets
 // before retrying lagging ones; malformed or ambiguous history fails immediately.
+// Finding the anchor on a retry does not verify coverage through the replacement
+// stream. Retain a gap error even when that retry recovers some fills.
 func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quanttick.TradeEvent, error) {
 	var recovered []quanttick.TradeEvent
 	var recoveryErrors []error
 	pending := make(map[string]quanttick.TradeEvent)
+	lagged := make(map[string]bool)
 	for _, symbol := range p.Symbols {
 		if anchor, ok := p.lastTrades[symbol]; ok {
 			pending[symbol] = anchor
@@ -56,6 +59,7 @@ func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quantti
 			}
 			rows, err := p.recoverSymbol(ctx, symbol, anchor, until)
 			if errors.Is(err, errPhoenixRecoveryAnchorMissing) {
+				lagged[symbol] = true
 				continue
 			}
 			delete(pending, symbol)
@@ -64,6 +68,11 @@ func (p *Phoenix) recoverTrades(ctx context.Context, until time.Time) ([]quantti
 				continue
 			}
 			recovered = append(recovered, rows...)
+			if lagged[symbol] {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf(
+					"phoenix recovery gap for %s: REST history lagged; coverage through the replacement WebSocket stream is unverified", symbol,
+				))
+			}
 		}
 		if len(pending) == 0 {
 			break
